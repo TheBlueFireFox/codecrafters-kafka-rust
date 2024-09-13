@@ -1,22 +1,28 @@
-#![allow(unused_imports)]
-use std::net::TcpListener;
+use tokio::select;
 
-fn main() {
+async fn accept_loop() -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:9092").await?;
+    loop {
+        let (stream, addr) = listener.accept().await?;
+        todo!();
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     println!("Logs from your program will appear here!");
 
-    // Uncomment this block to pass the first stage
-    //
-    // let listener = TcpListener::bind("127.0.0.1:9092").unwrap();
-    //
-    // for stream in listener.incoming() {
-    //     match stream {
-    //         Ok(_stream) => {
-    //             println!("accepted new connection");
-    //         }
-    //         Err(e) => {
-    //             println!("error: {}", e);
-    //         }
-    //     }
-    // }
+    let signal = tokio::signal::ctrl_c();
+
+    select! {
+        _ = accept_loop() => {
+            // will do nothing
+        }
+        _ = signal => {
+            // will break the application
+        }
+    };
+
+    Ok(())
 }
