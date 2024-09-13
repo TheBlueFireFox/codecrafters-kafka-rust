@@ -1,10 +1,15 @@
+mod connection;
+mod messages;
+
 use tokio::select;
 
 async fn accept_loop() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:9092").await?;
     loop {
-        let (stream, addr) = listener.accept().await?;
-        todo!();
+        let (stream, _addr) = listener.accept().await?;
+        tokio::spawn(async {
+            connection::handle_client(stream).await.unwrap();
+        });
     }
 }
 
