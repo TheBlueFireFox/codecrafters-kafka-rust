@@ -1,19 +1,13 @@
 use tokio::io::AsyncWriteExt;
 
-use crate::messages::{requests, responses};
-
 pub async fn handle_client(mut stream: tokio::net::TcpStream) -> anyhow::Result<()> {
     let mut msg = vec![0; 1024];
     let mut msg_out = vec![0; 1024];
 
     // TODO: put this into a loop
     read_stream(&stream, &mut msg).await?;
-    let req = requests::V0::try_from(&msg[..])?;
-    let res = responses::V0 {
-        correlation_id: req.correlation_id,
-    };
 
-    let s = res.write(&mut msg_out)?;
+    let s = super::process::process(&msg, &mut msg_out)?;
     stream.write_all(&msg_out[..s]).await?;
 
     todo!()

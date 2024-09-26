@@ -1,3 +1,9 @@
+#[derive(Debug, Clone, Copy)]
+#[repr(i16)]
+pub enum ErrorCode {
+    UnsupportedVersion = 35,
+}
+
 pub mod requests {
     use bytes::buf::Buf;
 
@@ -37,16 +43,31 @@ pub mod requests {
 pub mod responses {
     use bytes::buf::BufMut;
 
+    use super::ErrorCode;
+
     #[derive(Debug, Clone)]
-    pub struct V0 {
-        pub correlation_id: i32,
+    pub enum V0 {
+        ApiVersionsRequest {
+            correlation_id: i32,
+            error_code: Option<ErrorCode>,
+        },
     }
 
     impl V0 {
         pub fn write(&self, mut buf: &mut [u8]) -> anyhow::Result<usize> {
             let len = buf.len();
             let mut second = &mut buf[4..];
-            second.put_i32(self.correlation_id);
+            match self {
+                V0::ApiVersionsRequest {
+                    correlation_id,
+                    error_code,
+                } => {
+                    second.put_i32(*correlation_id);
+                    if let Some(err) = error_code {
+                        second.put_i16(*err as _)
+                    }
+                }
+            }
 
             let len = len - second.len();
             buf.put_i32(len as _);
