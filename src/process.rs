@@ -1,7 +1,11 @@
-use crate::messages::{requests, responses, ErrorCode};
+use crate::messages::{
+    requests,
+    responses::{self, Serialize},
+    ErrorCode,
+};
 
 pub fn process(msg: &[u8], msg_out: &mut [u8]) -> anyhow::Result<usize> {
-    let req = requests::V0::try_from(msg)?;
+    let req = requests::Request::try_from(msg)?;
 
     let res = handle_request(req)?;
 
@@ -9,19 +13,33 @@ pub fn process(msg: &[u8], msg_out: &mut [u8]) -> anyhow::Result<usize> {
     Ok(s)
 }
 
-fn handle_request(req: requests::V0) -> anyhow::Result<responses::V0> {
-    if !matches!(req.request_api_version, 0..=3) {
-        let res = responses::V0::ApiVersionsRequest {
-            correlation_id: req.correlation_id,
-            error_code: Some(ErrorCode::UnsupportedVersion),
-        };
-        return Ok(res);
-    }
+fn handle_request(req: requests::Request) -> anyhow::Result<responses::Response> {
+    let header = responses::Header {
+        correlation_id: req.header.correlation_id,
+    };
+    let response = match req.request {
+        requests::RequestType::ApiVersions(_api) => {
+            let api = match req.header.request_api_version {
+                4 => responses::ApiVersions {
+                    error_code: None,
+                    api_keys: responses::ApiKeys {
+                        keys: vec![responses::ApiKey {
+                            min_version: 4,
+                            max_version: 4,
+                        }],
+                    },
+                    throttle_time_ms: 0,
+                },
+                _ => responses::ApiVersions {
+                    error_code: Some(ErrorCode::UnsupportedVersion),
+                    api_keys: responses::ApiKeys { keys: vec![] },
+                    throttle_time_ms: 0,
+                },
+            };
 
-    let res = responses::V0::ApiVersionsRequest {
-        correlation_id: req.correlation_id,
-        error_code: None,
+            responses::ResponseType::ApiVersions(api)
+        }
     };
 
-    Ok(res)
+    Ok(responses::Response { header, response })
 }

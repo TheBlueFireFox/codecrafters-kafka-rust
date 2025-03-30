@@ -1,19 +1,33 @@
 use tokio::io::AsyncWriteExt;
 
+#[derive(Debug, thiserror::Error)]
+enum Error {
+    #[error("IO Error <{0}>")]
+    IO(#[from] std::io::Error),
+    #[error("Closed Connection")]
+    ConnectionClosed,
+}
+
 pub async fn handle_client(mut stream: tokio::net::TcpStream) -> anyhow::Result<()> {
     let mut msg = vec![0; 1024];
     let mut msg_out = vec![0; 1024];
 
     // TODO: put this into a loop
-    read_stream(&stream, &mut msg).await?;
-
-    let s = super::process::process(&msg, &mut msg_out)?;
-    stream.write_all(&msg_out[..s]).await?;
-
-    todo!()
+    loop {
+        match read_stream(&stream, &mut msg).await {
+            Ok(_) => {
+                let s = super::process::process(&msg, &mut msg_out)?;
+                stream.write_all(&msg_out[..s]).await?;
+            }
+            Err(Error::ConnectionClosed) => break Ok(()),
+            Err(err) => {
+                break Err(err.into());
+            }
+        }
+    }
 }
 
-async fn read_stream(stream: &tokio::net::TcpStream, msg: &mut Vec<u8>) -> anyhow::Result<()> {
+async fn read_stream(stream: &tokio::net::TcpStream, msg: &mut Vec<u8>) -> Result<(), Error> {
     // reset to base lenght
     msg.resize(1024, 0);
     msg.fill(0);
@@ -26,6 +40,9 @@ async fn read_stream(stream: &tokio::net::TcpStream, msg: &mut Vec<u8>) -> anyho
         // Try to read data, this may still fail with `WouldBlock`
         // if the readiness event is a false positive.
         match stream.try_read(&mut msg[len..]) {
+            Ok(0) => {
+                return Err(Error::ConnectionClosed);
+            }
             Ok(n) => {
                 len += n;
                 // second round should always be in here

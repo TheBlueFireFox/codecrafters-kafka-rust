@@ -9,7 +9,9 @@ async fn accept_loop() -> anyhow::Result<()> {
     loop {
         let (stream, _addr) = listener.accept().await?;
         tokio::spawn(async {
-            connection::handle_client(stream).await.unwrap();
+            if let Err(err) = connection::handle_client(stream).await {
+                println!("Connection closed -- <{err}>");
+            }
         });
     }
 }
@@ -26,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
             // will do nothing
         }
         _ = signal => {
-            // will break the application
+            // will stop the application
         }
     };
 
