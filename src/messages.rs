@@ -59,20 +59,31 @@ pub mod requests {
             type Error = SerializeError;
 
             fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-                const MASK_MSB: u8 = 0x01 << 7;
+                const MASK_MSB: u8 = 0x80;
                 const MASK: u8 = !MASK_MSB;
 
                 // ex: 0x01 0x00 0x00 0x01
+                // => 0b1000_0001
                 // 0b_1000_0001 0b1000_0000 0b1000_0000 0b0000_0001
-                let mut bytes = std::mem::size_of_val(&self.val) - 1;
-                while bytes > 0 {
-                    if self.val & (0xFF << (8 * bytes)) > 0 {
-                        break;
-                    }
-                    bytes -= 1;
-                }
+                let mut count = 0;
+                let mut val = self.val;
+                loop {
+                    let mut b = dbg!(val & (MASK as u32));
 
-                todo!()
+                    val >>= 7;
+
+                    if val > 0 {
+                        b |= 0x80;
+                    }
+
+                    buf[count] = b as u8;
+
+                    count += 1;
+
+                    if val == 0 {
+                        break Ok(count);
+                    }
+                }
             }
         }
 
@@ -85,7 +96,7 @@ pub mod requests {
         }
 
         #[test]
-        fn test_serialize_unsigned_varint() {
+        fn test_serialize_unsigned_varint_a() {
             let org = UnsignedVarint { val: 150 };
 
             let mut buf = [0; 4];
@@ -93,14 +104,18 @@ pub mod requests {
             let got = org.write(&mut buf);
             assert_eq!(Ok(2), got);
             assert_eq!(exp, buf[..2]);
+        }
 
+        #[test]
+        fn test_serialize_unsigned_varint_b() {
             let org = UnsignedVarint { val: 0x01_00_00_01 };
 
             let mut buf = [0; 4];
-            let exp = [0b0001_0000, 0b1000_0000, 0b1000_0000, 0b0000_0001];
+            let exp = [0b1000_0001, 0b1000_0000, 0b1000_0000, 0b0000_1000];
+
             let got = org.write(&mut buf);
             assert_eq!(Ok(4), got);
-            assert_eq!(exp, buf[..4]);
+            assert_eq!(exp, buf);
         }
 
         /// Represents a sequence of characters or null. For non-null strings, first the length N
@@ -147,7 +162,7 @@ pub mod requests {
     use bytes::buf::Buf;
     use parse::{Deserialize, NullableString, ParseError};
 
-    /// Request Header v2 => request_api_key request_api_version correlation_id client_id _tagged_fields
+    /// Request Header v1 => request_api_key request_api_version correlation_id client_id
     ///   request_api_key => INT16
     ///   request_api_version => INT16
     ///   correlation_id => INT32
@@ -260,7 +275,7 @@ pub mod responses {
     #[derive(Debug, Clone, thiserror::Error, PartialEq)]
     pub enum SerializeError {}
 
-    use super::ErrorCode;
+    use super::{requests::parse::UnsignedVarint, ErrorCode};
 
     pub trait Serialize {
         type Error;
@@ -288,6 +303,8 @@ pub mod responses {
         }
     }
 
+    // Response Header v0 => correlation_id
+    //   correlation_id => INT32
     #[derive(Debug, Clone)]
     pub struct Header {
         pub correlation_id: i32,
@@ -299,6 +316,9 @@ pub mod responses {
         fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
             let len = buf.len();
             buf.put_i32(self.correlation_id);
+
+            // _tagged_fields
+            // buf.put_u8(0);
 
             Ok(len - buf.remaining_mut())
         }
@@ -338,12 +358,15 @@ pub mod responses {
 
         fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
             (&mut buf[..]).put_i16(self.error_code.map(|s| s as i16).unwrap_or_default());
-
             let mut s = 2;
+
             s += self.api_keys.write(&mut buf[s..])?;
 
             (&mut buf[s..]).put_i32(self.throttle_time_ms);
-            Ok(s + 4)
+
+            (&mut buf[s..]).put_u8(0);
+
+            Ok(s + 4 + 1)
         }
     }
 
@@ -360,18 +383,16 @@ pub mod responses {
         type Error = SerializeError;
 
         fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-            (&mut buf[..]).put_i32(self.keys.len() as i32);
-            let mut s = 4;
+            let mut s = UnsignedVarint {
+                val: (self.keys.len() + 1) as u32,
+            }
+            .write(buf)?;
 
-            for (i, key) in self.keys.iter().enumerate() {
-                (&mut buf[s..]).put_i16(i as _);
-                s += 2;
-                s += key.write(&mut buf[s + 2..])?;
+            for key in &self.keys {
+                s += key.write(&mut buf[s..])?;
             }
 
-            (&mut buf[s..]).put_u8(0);
-
-            Ok(s + 1)
+            Ok(s)
         }
     }
 
@@ -381,6 +402,7 @@ pub mod responses {
     ///     max_version => INT16
     #[derive(Debug, Clone)]
     pub struct ApiKey {
+        pub api_key: i16,
         pub min_version: i16,
         pub max_version: i16,
     }
@@ -389,10 +411,14 @@ pub mod responses {
         type Error = SerializeError;
 
         fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
+            let len = buf.len();
+            buf.put_i16(self.api_key);
             buf.put_i16(self.min_version);
             buf.put_i16(self.max_version);
 
-            Ok(buf.len() - buf.remaining_mut())
+            // _tagged_fields
+            buf.put_u8(0);
+            Ok(len - buf.remaining_mut())
         }
     }
 }
