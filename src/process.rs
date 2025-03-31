@@ -1,8 +1,13 @@
 use crate::messages::{
-    requests,
-    responses::{self, Serialize},
-    ErrorCode,
+    primitives::{CompactArray, Serialize},
+    requests, responses, ApiKeys, ErrorCode,
 };
+
+const SUPPORTED_COMMANDS: [responses::ApiKey; 1] = [responses::ApiKey {
+    min_version: 4,
+    max_version: 4,
+    api_key: ApiKeys::ApiVersions,
+}];
 
 pub fn process(msg: &[u8], msg_out: &mut [u8]) -> anyhow::Result<usize> {
     let req = requests::Request::try_from(msg)?;
@@ -22,18 +27,14 @@ fn handle_request(req: requests::Request) -> anyhow::Result<responses::Response>
             let api = match req.header.request_api_version {
                 4 => responses::ApiVersions {
                     error_code: None,
-                    api_keys: responses::ApiKeys {
-                        keys: vec![responses::ApiKey {
-                            min_version: 4,
-                            max_version: 4,
-                            api_key: 0x12,
-                        }],
+                    api_keys: CompactArray {
+                        vec: SUPPORTED_COMMANDS.to_vec(),
                     },
                     throttle_time_ms: 0,
                 },
                 _ => responses::ApiVersions {
                     error_code: Some(ErrorCode::UnsupportedVersion),
-                    api_keys: responses::ApiKeys { keys: vec![] },
+                    api_keys: CompactArray { vec: vec![] },
                     throttle_time_ms: 0,
                 },
             };

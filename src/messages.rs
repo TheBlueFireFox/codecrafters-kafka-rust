@@ -1,166 +1,204 @@
 #[derive(Debug, Clone, Copy)]
 #[repr(i16)]
+pub enum ApiKeys {
+    ApiVersions = 18,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(i16)]
 pub enum ErrorCode {
     UnsupportedVersion = 35,
 }
 
-pub mod requests {
+pub mod primitives {
+    use bytes::Buf;
 
-    pub mod parse {
-        use bytes::Buf;
+    #[derive(Debug, thiserror::Error, PartialEq)]
+    pub enum ParseError {
+        #[error("Invalid buffer size <{0}> expected <{1}>")]
+        InvalidSize(usize, usize),
+        #[error("Error size too large <{0}>")]
+        SizeTooLarge(#[from] core::num::TryFromIntError),
+        #[error("Invalid Utf8 String <{0}>")]
+        InvalidUtf8(#[from] std::str::Utf8Error),
+    }
 
-        use crate::messages::responses::{Serialize, SerializeError};
+    pub trait Deserialize: Sized {
+        type Error;
 
-        #[derive(Debug, thiserror::Error, PartialEq)]
-        pub enum ParseError {
-            #[error("Invalid buffer size <{0}> expected <{1}>")]
-            InvalidSize(usize, usize),
-            #[error("Error size too large <{0}>")]
-            SizeTooLarge(#[from] core::num::TryFromIntError),
-            #[error("Invalid Utf8 String <{0}>")]
-            InvalidUtf8(#[from] std::str::Utf8Error),
+        fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error>;
+    }
+
+    pub trait Serialize {
+        type Error;
+        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error>;
+    }
+
+    #[derive(Debug, Clone, thiserror::Error, PartialEq)]
+    pub enum SerializeError {}
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct UnsignedVarint {
+        pub val: u32,
+    }
+
+    impl Deserialize for UnsignedVarint {
+        type Error = ParseError;
+
+        fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
+            let mut s = 0;
+            let mut res = 0;
+
+            const MASK_MSB: u8 = 0x01 << 7;
+            const MASK: u8 = !MASK_MSB;
+
+            loop {
+                let m = (v[s] & MASK) as u32;
+                res |= m << (7 * s);
+
+                if v[s] & MASK_MSB == 0 {
+                    break;
+                }
+                s += 1;
+            }
+
+            Ok((Self { val: res }, s + 1))
         }
-        pub(super) trait Deserialize: Sized {
-            type Error;
+    }
 
-            fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error>;
-        }
+    impl Serialize for UnsignedVarint {
+        type Error = SerializeError;
 
-        #[derive(Debug, Clone, PartialEq, Eq)]
-        pub struct UnsignedVarint {
-            pub val: u32,
-        }
+        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            const MASK_MSB: u8 = 0x80;
+            const MASK: u8 = !MASK_MSB;
 
-        impl Deserialize for UnsignedVarint {
-            type Error = ParseError;
+            // ex: 0x01 0x00 0x00 0x01
+            // => 0b1000_0001
+            // 0b_1000_0001 0b1000_0000 0b1000_0000 0b0000_0001
+            let mut count = 0;
+            let mut val = self.val;
+            loop {
+                let mut b = dbg!(val & (MASK as u32));
 
-            fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
-                let mut s = 0;
-                let mut res = 0;
+                val >>= 7;
 
-                const MASK_MSB: u8 = 0x01 << 7;
-                const MASK: u8 = !MASK_MSB;
-
-                loop {
-                    let m = (v[s] & MASK) as u32;
-                    res |= m << (7 * s);
-
-                    if v[s] & MASK_MSB == 0 {
-                        break;
-                    }
-                    s += 1;
+                if val > 0 {
+                    b |= 0x80;
                 }
 
-                Ok((Self { val: res }, s + 1))
-            }
-        }
+                buf[count] = b as u8;
 
-        impl Serialize for UnsignedVarint {
-            type Error = SerializeError;
+                count += 1;
 
-            fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-                const MASK_MSB: u8 = 0x80;
-                const MASK: u8 = !MASK_MSB;
-
-                // ex: 0x01 0x00 0x00 0x01
-                // => 0b1000_0001
-                // 0b_1000_0001 0b1000_0000 0b1000_0000 0b0000_0001
-                let mut count = 0;
-                let mut val = self.val;
-                loop {
-                    let mut b = dbg!(val & (MASK as u32));
-
-                    val >>= 7;
-
-                    if val > 0 {
-                        b |= 0x80;
-                    }
-
-                    buf[count] = b as u8;
-
-                    count += 1;
-
-                    if val == 0 {
-                        break Ok(count);
-                    }
+                if val == 0 {
+                    break Ok(count);
                 }
-            }
-        }
-
-        #[test]
-        fn test_deserialize_unsigned_varint() {
-            let org = [0b10010110, 0b00000001];
-            let exp = Ok((UnsignedVarint { val: 150 }, 2));
-            let got = UnsignedVarint::parse(&org);
-            assert_eq!(exp, got);
-        }
-
-        #[test]
-        fn test_serialize_unsigned_varint_a() {
-            let org = UnsignedVarint { val: 150 };
-
-            let mut buf = [0; 4];
-            let exp = [0b10010110, 0b00000001];
-            let got = org.write(&mut buf);
-            assert_eq!(Ok(2), got);
-            assert_eq!(exp, buf[..2]);
-        }
-
-        #[test]
-        fn test_serialize_unsigned_varint_b() {
-            let org = UnsignedVarint { val: 0x01_00_00_01 };
-
-            let mut buf = [0; 4];
-            let exp = [0b1000_0001, 0b1000_0000, 0b1000_0000, 0b0000_1000];
-
-            let got = org.write(&mut buf);
-            assert_eq!(Ok(4), got);
-            assert_eq!(exp, buf);
-        }
-
-        /// Represents a sequence of characters or null. For non-null strings, first the length N
-        /// is given as an INT16. Then N bytes follow which are the UTF-8 encoding of the character
-        /// sequence. A null value is encoded with length of -1 and there are no following bytes.
-        #[derive(Debug, Clone)]
-        pub struct NullableString {
-            pub str: Option<String>,
-        }
-
-        impl Deserialize for NullableString {
-            type Error = ParseError;
-
-            fn parse(mut v: &[u8]) -> Result<(Self, usize), Self::Error> {
-                let len = v.get_i16().min(0) as usize;
-                let mut str = None;
-                if len > 0 {
-                    let s = std::str::from_utf8(&v[2..][..len])?;
-                    str = Some(s.to_string());
-                }
-                Ok((Self { str }, len))
-            }
-        }
-
-        /// Represents a sequence of characters. First the length N + 1 is given as an
-        /// UNSIGNED_VARINT . Then N bytes follow which are the UTF-8 encoding of the character
-        /// sequence.
-        #[derive(Debug, Clone)]
-        pub struct CompactString {
-            pub str: String,
-        }
-
-        impl Deserialize for CompactString {
-            type Error = ParseError;
-
-            fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
-                let (size, used) = UnsignedVarint::parse(v)?;
-                let s = std::str::from_utf8(&v[used..][..size.val as usize])?.to_string();
-                Ok((Self { str: s }, used + size.val as usize))
             }
         }
     }
 
+    #[test]
+    fn test_deserialize_unsigned_varint() {
+        let org = [0b10010110, 0b00000001];
+        let exp = Ok((UnsignedVarint { val: 150 }, 2));
+        let got = UnsignedVarint::parse(&org);
+        assert_eq!(exp, got);
+    }
+
+    #[test]
+    fn test_serialize_unsigned_varint_a() {
+        let org = UnsignedVarint { val: 150 };
+
+        let mut buf = [0; 4];
+        let exp = [0b10010110, 0b00000001];
+        let got = org.write(&mut buf);
+        assert_eq!(Ok(2), got);
+        assert_eq!(exp, buf[..2]);
+    }
+
+    #[test]
+    fn test_serialize_unsigned_varint_b() {
+        let org = UnsignedVarint { val: 0x01_00_00_01 };
+
+        let mut buf = [0; 4];
+        let exp = [0b1000_0001, 0b1000_0000, 0b1000_0000, 0b0000_1000];
+
+        let got = org.write(&mut buf);
+        assert_eq!(Ok(4), got);
+        assert_eq!(exp, buf);
+    }
+
+    /// Represents a sequence of characters or null. For non-null strings, first the length N
+    /// is given as an INT16. Then N bytes follow which are the UTF-8 encoding of the character
+    /// sequence. A null value is encoded with length of -1 and there are no following bytes.
+    #[derive(Debug, Clone)]
+    pub struct NullableString {
+        pub str: Option<String>,
+    }
+
+    impl Deserialize for NullableString {
+        type Error = ParseError;
+
+        fn parse(mut v: &[u8]) -> Result<(Self, usize), Self::Error> {
+            let len = v.get_i16().min(0) as usize;
+            let mut str = None;
+            if len > 0 {
+                let s = std::str::from_utf8(&v[2..][..len])?;
+                str = Some(s.to_string());
+            }
+            Ok((Self { str }, len))
+        }
+    }
+
+    /// Represents a sequence of characters. First the length N + 1 is given as an
+    /// UNSIGNED_VARINT . Then N bytes follow which are the UTF-8 encoding of the character
+    /// sequence.
+    #[derive(Debug, Clone)]
+    pub struct CompactString {
+        pub str: String,
+    }
+
+    impl Deserialize for CompactString {
+        type Error = ParseError;
+
+        fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
+            let (size, used) = UnsignedVarint::parse(v)?;
+            let s = std::str::from_utf8(&v[used..][..size.val as usize])?.to_string();
+            Ok((Self { str: s }, used + size.val as usize))
+        }
+    }
+
+    /// Represents a sequence of objects of a given type T. Type T can be either a primitive type
+    /// (e.g. STRING) or a structure. First, the length N + 1 is given as an UNSIGNED_VARINT. Then
+    /// N instances of type T follow. A null array is represented with a length of 0. In protocol
+    /// documentation an array of T instances is referred to as [T].
+    #[derive(Debug, Clone)]
+    pub struct CompactArray<T> {
+        pub vec: Vec<T>,
+    }
+
+    impl<T: Serialize<Error = SerializeError>> Serialize for CompactArray<T> {
+        type Error = SerializeError;
+
+        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            let size = UnsignedVarint {
+                val: (self.vec.len() + 1) as u32,
+            };
+            let mut s = size.write(buf)?;
+
+            for key in &self.vec {
+                s += key.write(&mut buf[s..])?;
+            }
+
+            Ok(s)
+        }
+    }
+}
+
+pub mod requests {
+    use super::primitives::{CompactString, Deserialize, NullableString, ParseError};
     use bytes::buf::Buf;
-    use parse::{Deserialize, NullableString, ParseError};
 
     /// Request Header v1 => request_api_key request_api_version correlation_id client_id
     ///   request_api_key => INT16
@@ -185,7 +223,6 @@ pub mod requests {
             let request_api_version = buf.get_i16();
             let correlation_id = buf.get_i32();
 
-            // TODO: parse correctly
             let rem = len - buf.remaining();
             let (client_id, s) = NullableString::parse(&buf[rem..])?;
 
@@ -248,16 +285,16 @@ pub mod requests {
     }
     #[derive(Debug, Clone)]
     pub struct ApiVersions {
-        pub client_software_name: parse::CompactString,
-        pub client_software_version: parse::CompactString,
+        pub client_software_name: CompactString,
+        pub client_software_version: CompactString,
     }
 
     impl Deserialize for ApiVersions {
         type Error = ParseError;
 
         fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
-            let (client_software_name, s) = parse::CompactString::parse(v)?;
-            let (client_software_version, a) = parse::CompactString::parse(&v[s..])?;
+            let (client_software_name, s) = CompactString::parse(v)?;
+            let (client_software_version, a) = CompactString::parse(&v[s..])?;
             Ok((
                 Self {
                     client_software_name,
@@ -270,17 +307,9 @@ pub mod requests {
 }
 
 pub mod responses {
+    use super::primitives::{CompactArray, Serialize, SerializeError};
+    use super::{ApiKeys, ErrorCode};
     use bytes::buf::BufMut;
-
-    #[derive(Debug, Clone, thiserror::Error, PartialEq)]
-    pub enum SerializeError {}
-
-    use super::{requests::parse::UnsignedVarint, ErrorCode};
-
-    pub trait Serialize {
-        type Error;
-        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error>;
-    }
 
     #[derive(Debug, Clone)]
     pub struct Response {
@@ -317,9 +346,6 @@ pub mod responses {
             let len = buf.len();
             buf.put_i32(self.correlation_id);
 
-            // _tagged_fields
-            // buf.put_u8(0);
-
             Ok(len - buf.remaining_mut())
         }
     }
@@ -349,7 +375,7 @@ pub mod responses {
     #[derive(Debug, Clone)]
     pub struct ApiVersions {
         pub error_code: Option<ErrorCode>,
-        pub api_keys: ApiKeys,
+        pub api_keys: CompactArray<ApiKey>,
         pub throttle_time_ms: i32,
     }
 
@@ -375,34 +401,8 @@ pub mod responses {
     ///     min_version => INT16
     ///     max_version => INT16
     #[derive(Debug, Clone)]
-    pub struct ApiKeys {
-        pub keys: Vec<ApiKey>,
-    }
-
-    impl Serialize for ApiKeys {
-        type Error = SerializeError;
-
-        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-            let mut s = UnsignedVarint {
-                val: (self.keys.len() + 1) as u32,
-            }
-            .write(buf)?;
-
-            for key in &self.keys {
-                s += key.write(&mut buf[s..])?;
-            }
-
-            Ok(s)
-        }
-    }
-
-    ///   api_keys => api_key min_version max_version _tagged_fields
-    ///     api_key => INT16
-    ///     min_version => INT16
-    ///     max_version => INT16
-    #[derive(Debug, Clone)]
     pub struct ApiKey {
-        pub api_key: i16,
+        pub api_key: ApiKeys,
         pub min_version: i16,
         pub max_version: i16,
     }
@@ -412,7 +412,7 @@ pub mod responses {
 
         fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
             let len = buf.len();
-            buf.put_i16(self.api_key);
+            buf.put_i16(self.api_key as i16);
             buf.put_i16(self.min_version);
             buf.put_i16(self.max_version);
 
