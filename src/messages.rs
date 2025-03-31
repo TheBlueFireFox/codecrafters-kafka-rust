@@ -9,6 +9,8 @@ pub mod requests {
     pub mod parse {
         use bytes::Buf;
 
+        use crate::messages::responses::{Serialize, SerializeError};
+
         #[derive(Debug, thiserror::Error, PartialEq)]
         pub enum ParseError {
             #[error("Invalid buffer size <{0}> expected <{1}>")]
@@ -18,7 +20,7 @@ pub mod requests {
             #[error("Invalid Utf8 String <{0}>")]
             InvalidUtf8(#[from] std::str::Utf8Error),
         }
-        pub(super) trait Parse: Sized {
+        pub(super) trait Deserialize: Sized {
             type Error;
 
             fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error>;
@@ -29,7 +31,7 @@ pub mod requests {
             pub val: u32,
         }
 
-        impl Parse for UnsignedVarint {
+        impl Deserialize for UnsignedVarint {
             type Error = ParseError;
 
             fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
@@ -53,12 +55,52 @@ pub mod requests {
             }
         }
 
+        impl Serialize for UnsignedVarint {
+            type Error = SerializeError;
+
+            fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+                const MASK_MSB: u8 = 0x01 << 7;
+                const MASK: u8 = !MASK_MSB;
+
+                // ex: 0x01 0x00 0x00 0x01
+                // 0b_1000_0001 0b1000_0000 0b1000_0000 0b0000_0001
+                let mut bytes = size_of_val(&self.val) - 1;
+                while bytes > 0 {
+                    if self.val & (0xFF << (8 * bytes)) > 0 {
+                        break;
+                    }
+                    bytes -= 1;
+                }
+
+                todo!()
+            }
+        }
+
         #[test]
-        fn test_parse_unsigned_varint() {
+        fn test_deserialize_unsigned_varint() {
             let org = [0b10010110, 0b00000001];
             let exp = Ok((UnsignedVarint { val: 150 }, 2));
             let got = UnsignedVarint::parse(&org);
             assert_eq!(exp, got);
+        }
+
+        #[test]
+        fn test_serialize_unsigned_varint() {
+            let org = UnsignedVarint { val: 150 };
+
+            let mut buf = [0; 4];
+            let exp = [0b10010110, 0b00000001];
+            let got = org.write(&mut buf);
+            assert_eq!(Ok(2), got);
+            assert_eq!(exp, buf[..2]);
+
+            let org = UnsignedVarint { val: 0x01_00_00_01 };
+
+            let mut buf = [0; 4];
+            let exp = [0b0001_0000, 0b1000_0000, 0b1000_0000, 0b0000_0001];
+            let got = org.write(&mut buf);
+            assert_eq!(Ok(4), got);
+            assert_eq!(exp, buf[..4]);
         }
 
         /// Represents a sequence of characters or null. For non-null strings, first the length N
@@ -69,7 +111,7 @@ pub mod requests {
             pub str: Option<String>,
         }
 
-        impl Parse for NullableString {
+        impl Deserialize for NullableString {
             type Error = ParseError;
 
             fn parse(mut v: &[u8]) -> Result<(Self, usize), Self::Error> {
@@ -91,7 +133,7 @@ pub mod requests {
             pub str: String,
         }
 
-        impl Parse for CompactString {
+        impl Deserialize for CompactString {
             type Error = ParseError;
 
             fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
@@ -103,7 +145,7 @@ pub mod requests {
     }
 
     use bytes::buf::Buf;
-    use parse::{NullableString, Parse, ParseError};
+    use parse::{Deserialize, NullableString, ParseError};
 
     /// Request Header v2 => request_api_key request_api_version correlation_id client_id _tagged_fields
     ///   request_api_key => INT16
@@ -118,7 +160,7 @@ pub mod requests {
         pub client_id: NullableString,
     }
 
-    impl Parse for Header {
+    impl Deserialize for Header {
         type Error = ParseError;
 
         fn parse(mut buf: &[u8]) -> Result<(Self, usize), Self::Error> {
@@ -195,7 +237,7 @@ pub mod requests {
         pub client_software_version: parse::CompactString,
     }
 
-    impl Parse for ApiVersions {
+    impl Deserialize for ApiVersions {
         type Error = ParseError;
 
         fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
@@ -215,7 +257,7 @@ pub mod requests {
 pub mod responses {
     use bytes::buf::BufMut;
 
-    #[derive(Debug, Clone, thiserror::Error)]
+    #[derive(Debug, Clone, thiserror::Error, PartialEq)]
     pub enum SerializeError {}
 
     use super::ErrorCode;
