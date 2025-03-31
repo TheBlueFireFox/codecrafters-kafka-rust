@@ -64,7 +64,7 @@ pub mod requests {
 
                 // ex: 0x01 0x00 0x00 0x01
                 // 0b_1000_0001 0b1000_0000 0b1000_0000 0b0000_0001
-                let mut bytes = size_of_val(&self.val) - 1;
+                let mut bytes = std::mem::size_of_val(&self.val) - 1;
                 while bytes > 0 {
                     if self.val & (0xFF << (8 * bytes)) > 0 {
                         break;
@@ -369,7 +369,9 @@ pub mod responses {
                 s += key.write(&mut buf[s + 2..])?;
             }
 
-            Ok(s)
+            (&mut buf[s..]).put_u8(0);
+
+            Ok(s + 1)
         }
     }
 
