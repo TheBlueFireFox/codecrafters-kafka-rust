@@ -1,5 +1,5 @@
 use crate::messages::{
-    primitives::{CompactArray, Serialize},
+    primitives::{CompactArray, Serialize, TaggedFields},
     requests, responses, ApiKeys, ErrorCode,
 };
 
@@ -7,6 +7,7 @@ const SUPPORTED_COMMANDS: [responses::ApiKey; 1] = [responses::ApiKey {
     min_version: 4,
     max_version: 4,
     api_key: ApiKeys::ApiVersions,
+    _tagged_fields: TaggedFields{},
 }];
 
 pub fn process(msg: &[u8], msg_out: &mut [u8]) -> anyhow::Result<usize> {
@@ -31,11 +32,13 @@ fn handle_request(req: requests::Request) -> anyhow::Result<responses::Response>
                         vec: SUPPORTED_COMMANDS.to_vec(),
                     },
                     throttle_time_ms: 0,
+                    _tagged_fields: TaggedFields {  },
                 },
                 _ => responses::ApiVersions {
                     error_code: Some(ErrorCode::UnsupportedVersion),
                     api_keys: CompactArray { vec: vec![] },
                     throttle_time_ms: 0,
+                    _tagged_fields: TaggedFields {  },
                 },
             };
 

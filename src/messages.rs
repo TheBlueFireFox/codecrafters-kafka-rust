@@ -11,6 +11,8 @@ pub enum ErrorCode {
 }
 
 pub mod primitives {
+    use std::collections::HashMap;
+
     use bytes::Buf;
 
     #[derive(Debug, thiserror::Error, PartialEq)]
@@ -79,7 +81,7 @@ pub mod primitives {
             let mut count = 0;
             let mut val = self.val;
             loop {
-                let mut b = dbg!(val & (MASK as u32));
+                let mut b = val & (MASK as u32);
 
                 val >>= 7;
 
@@ -192,6 +194,41 @@ pub mod primitives {
             }
 
             Ok(s)
+        }
+    }
+
+    /// Tag Headers
+    ///
+    /// The tag header contains two unsigned variable-length integers.  The first one contains the
+    /// field's tag.  The second one is the length of the field.
+    /// number of tagged fields UNSIGNED_VARINT
+    /// fields x tag: UNSIGNED_VARINT
+    /// field 1 len UNSIGNED_VARINT
+    /// Data <field 1 type>
+    #[derive(Debug, Clone)]
+    pub struct TaggedFields;
+
+    impl Deserialize for TaggedFields {
+        type Error = ParseError;
+
+        fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
+            if v[0] == 0 {
+                return Ok((TaggedFields, 1));
+            }
+
+            unimplemented!("The TaggedFields only support the empty variation")
+        }
+    }
+
+    impl Serialize for TaggedFields {
+        type Error = SerializeError;
+
+        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            if buf[0] == 0 {
+                return Ok(1);
+            }
+
+            unimplemented!("The TaggedFields only support the empty variation")
         }
     }
 }
@@ -307,7 +344,7 @@ pub mod requests {
 }
 
 pub mod responses {
-    use super::primitives::{CompactArray, Serialize, SerializeError};
+    use super::primitives::{CompactArray, Serialize, SerializeError, TaggedFields};
     use super::{ApiKeys, ErrorCode};
     use bytes::buf::BufMut;
 
@@ -377,6 +414,7 @@ pub mod responses {
         pub error_code: Option<ErrorCode>,
         pub api_keys: CompactArray<ApiKey>,
         pub throttle_time_ms: i32,
+        pub _tagged_fields: TaggedFields,
     }
 
     impl Serialize for ApiVersions {
@@ -389,10 +427,11 @@ pub mod responses {
             s += self.api_keys.write(&mut buf[s..])?;
 
             (&mut buf[s..]).put_i32(self.throttle_time_ms);
+            s += 4;
 
-            (&mut buf[s..]).put_u8(0);
+            s += self._tagged_fields.write(&mut buf[s..])?;
 
-            Ok(s + 4 + 1)
+            Ok(s)
         }
     }
 
@@ -405,6 +444,7 @@ pub mod responses {
         pub api_key: ApiKeys,
         pub min_version: i16,
         pub max_version: i16,
+        pub _tagged_fields: TaggedFields,
     }
 
     impl Serialize for ApiKey {
@@ -417,8 +457,9 @@ pub mod responses {
             buf.put_i16(self.max_version);
 
             // _tagged_fields
-            buf.put_u8(0);
-            Ok(len - buf.remaining_mut())
+            let mut len = len - buf.remaining_mut();
+            len += self._tagged_fields.write(buf)?;
+            Ok(len)
         }
     }
 }
