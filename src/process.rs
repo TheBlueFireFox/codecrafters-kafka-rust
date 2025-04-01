@@ -5,7 +5,7 @@ use crate::messages::{
     ApiKeys, ErrorCode,
 };
 
-const SUPPORTED_COMMANDS: [ApiKey; 2] = [
+static SUPPORTED_COMMANDS: [ApiKey; 2] = [
     ApiKey {
         api_key: ApiKeys::Fetch,
         min_version: 16,
@@ -34,31 +34,35 @@ fn handle_request(req: requests::Request) -> anyhow::Result<responses::Response>
         correlation_id: req.header.correlation_id,
     };
     let response = match req.request {
+        requests::RequestType::Fetch(fetch) => handle_fetch(req.header, fetch)?,
         requests::RequestType::ApiVersions(api) => handle_api_version(req.header, api)?,
     };
 
     Ok(responses::Response { header, response })
 }
 
+fn handle_fetch(
+    _header: requests::Header,
+    _fetch: requests::fetch::Fetch,
+) -> anyhow::Result<responses::ResponseType> {
+    todo!()
+}
+
 fn handle_api_version(
     header: requests::Header,
-    _api: requests::ApiVersions,
+    _api: requests::api_versions::ApiVersions,
 ) -> anyhow::Result<responses::ResponseType> {
     use responses::api_version::*;
     let api = match header.request_api_version {
         4 => ApiVersions {
-            error_code: None,
             api_keys: CompactArray {
                 vec: SUPPORTED_COMMANDS.to_vec(),
             },
-            throttle_time_ms: 0,
-            _tagged_fields: TaggedFields {},
+            ..Default::default()
         },
         _ => ApiVersions {
-            error_code: Some(ErrorCode::UnsupportedVersion),
-            api_keys: CompactArray { vec: vec![] },
-            throttle_time_ms: 0,
-            _tagged_fields: TaggedFields {},
+            error_code: ErrorCode::UnsupportedVersion,
+            ..Default::default()
         },
     };
 
@@ -83,11 +87,14 @@ fn test_full_parse() {
     ];
 
     let exp = [
-        0x00, 0x00, 0x00, 0x13, // len
+        0x00, 0x00, 0x00, 0x1a, // len
         0x6d, 0xfe, 0xa9, 0x9a, // correlation_id = 0x6d 0xfe 0xa9 0x9a
-        // 0x00, // _tagged_fields
         0x00, 0x00, // error code = no error
-        0x02, // len api_keys (compact array N + 1)
+        0x03, // len api_keys (compact array N + 1)
+        0x00, 0x01, // api_key
+        0x00, 0x10, // min_version
+        0x00, 0x10, // max_version
+        0x00, // _tagged_fields
         0x00, 0x12, // api_key
         0x00, 0x04, // min_version
         0x00, 0x04, // max_version

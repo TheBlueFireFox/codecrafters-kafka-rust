@@ -1,13 +1,16 @@
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 #[repr(i16)]
 pub enum ApiKeys {
     Fetch = 1,
+    #[default]
     ApiVersions = 18,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 #[repr(i16)]
 pub enum ErrorCode {
+    #[default]
+    NoError = 0,
     UnsupportedVersion = 35,
 }
 
@@ -174,12 +177,12 @@ pub mod primitives {
     /// (e.g. STRING) or a structure. First, the length N + 1 is given as an UNSIGNED_VARINT. Then
     /// N instances of type T follow. A null array is represented with a length of 0. In protocol
     /// documentation an array of T instances is referred to as [T].
-    #[derive(Debug, Clone)]
-    pub struct CompactArray<T> {
+    #[derive(Debug, Clone, Default)]
+    pub struct CompactArray<T: Default> {
         pub vec: Vec<T>,
     }
 
-    impl<T: Serialize<Error = SerializeError>> Serialize for CompactArray<T> {
+    impl<T: Serialize<Error = SerializeError> + Default> Serialize for CompactArray<T> {
         type Error = SerializeError;
 
         fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
@@ -204,7 +207,7 @@ pub mod primitives {
     /// fields x tag: UNSIGNED_VARINT
     /// field 1 len UNSIGNED_VARINT
     /// Data <field 1 type>
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Default)]
     pub struct TaggedFields;
 
     impl Deserialize for TaggedFields {
@@ -284,7 +287,8 @@ pub mod requests {
 
     #[derive(Debug, Clone)]
     pub enum RequestType {
-        ApiVersions(ApiVersions),
+        Fetch(fetch::Fetch),
+        ApiVersions(api_versions::ApiVersions),
     }
 
     impl TryFrom<&[u8]> for Request {
@@ -310,8 +314,12 @@ pub mod requests {
     impl RequestType {
         fn parse(request_api_key: i16, v: &[u8]) -> Result<(Self, usize), ParseError> {
             let s = match request_api_key {
+                1 => {
+                    let s = fetch::Fetch::parse(v)?;
+                    (RequestType::Fetch(s.0), s.1)
+                }
                 18 => {
-                    let s = ApiVersions::parse(v)?;
+                    let s = api_versions::ApiVersions::parse(v)?;
                     (RequestType::ApiVersions(s.0), s.1)
                 }
                 _ => unimplemented!("no such request key"),
@@ -319,25 +327,92 @@ pub mod requests {
             Ok(s)
         }
     }
-    #[derive(Debug, Clone)]
-    pub struct ApiVersions {
-        pub client_software_name: CompactString,
-        pub client_software_version: CompactString,
+
+    pub mod fetch {
+        use super::*;
+
+        /// Fetch Request (Version: 16) => max_wait_ms min_bytes max_bytes isolation_level session_id session_epoch [topics] [forgotten_topics_data] rack_id _tagged_fields
+        ///   max_wait_ms => INT32
+        ///   min_bytes => INT32
+        ///   max_bytes => INT32
+        ///   isolation_level => INT8
+        ///   session_id => INT32
+        ///   session_epoch => INT32
+        ///   topics => topic_id [partitions] _tagged_fields
+        ///     topic_id => UUID
+        ///     partitions => partition current_leader_epoch fetch_offset last_fetched_epoch log_start_offset partition_max_bytes _tagged_fields
+        ///       partition => INT32
+        ///       current_leader_epoch => INT32
+        ///       fetch_offset => INT64
+        ///       last_fetched_epoch => INT32
+        ///       log_start_offset => INT64
+        ///       partition_max_bytes => INT32
+        ///   forgotten_topics_data => topic_id [partitions] _tagged_fields
+        ///     topic_id => UUID
+        ///     partitions => INT32
+        ///   rack_id => COMPACT_STRING
+        #[derive(Debug, Clone)]
+        pub struct Fetch {
+            max_wait_ms: i32,
+            min_bytes: i32,
+            max_bytes: i32,
+            isolation_level: i8,
+            session_id: i32,
+            session_epoch: i32,
+            topics: Topics,
+            forgotten_topics_data: ForgottenTopicsData,
+            rack_id: CompactString,
+        }
+
+        impl Deserialize for Fetch {
+            type Error = ParseError;
+
+            fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
+                todo!()
+            }
+        }
+
+        ///   topics => topic_id [partitions] _tagged_fields
+        ///     topic_id => UUID
+        ///     partitions => partition current_leader_epoch fetch_offset last_fetched_epoch log_start_offset partition_max_bytes _tagged_fields
+        ///       partition => INT32
+        ///       current_leader_epoch => INT32
+        ///       fetch_offset => INT64
+        ///       last_fetched_epoch => INT32
+        ///       log_start_offset => INT64
+        ///       partition_max_bytes => INT32
+        #[derive(Debug, Clone)]
+        pub struct Topics {}
+
+        ///   forgotten_topics_data => topic_id [partitions] _tagged_fields
+        ///     topic_id => UUID
+        ///     partitions => INT32
+        #[derive(Debug, Clone)]
+        pub struct ForgottenTopicsData {}
     }
 
-    impl Deserialize for ApiVersions {
-        type Error = ParseError;
+    pub mod api_versions {
+        use super::*;
+        #[derive(Debug, Clone)]
+        pub struct ApiVersions {
+            pub client_software_name: CompactString,
+            pub client_software_version: CompactString,
+        }
 
-        fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
-            let (client_software_name, s) = CompactString::parse(v)?;
-            let (client_software_version, a) = CompactString::parse(&v[s..])?;
-            Ok((
-                Self {
-                    client_software_name,
-                    client_software_version,
-                },
-                s + a,
-            ))
+        impl Deserialize for ApiVersions {
+            type Error = ParseError;
+
+            fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
+                let (client_software_name, s) = CompactString::parse(v)?;
+                let (client_software_version, a) = CompactString::parse(&v[s..])?;
+                Ok((
+                    Self {
+                        client_software_name,
+                        client_software_version,
+                    },
+                    s + a,
+                ))
+            }
         }
     }
 }
@@ -411,9 +486,9 @@ pub mod responses {
         ///     min_version => INT16
         ///     max_version => INT16
         ///   throttle_time_ms => INT32
-        #[derive(Debug, Clone)]
+        #[derive(Debug, Clone, Default)]
         pub struct ApiVersions {
-            pub error_code: Option<ErrorCode>,
+            pub error_code: ErrorCode,
             pub api_keys: CompactArray<ApiKey>,
             pub throttle_time_ms: i32,
             pub _tagged_fields: TaggedFields,
@@ -423,7 +498,7 @@ pub mod responses {
             type Error = SerializeError;
 
             fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-                (&mut buf[..]).put_i16(self.error_code.map(|s| s as i16).unwrap_or_default());
+                (&mut buf[..]).put_i16(self.error_code as i16);
                 let mut s = 2;
 
                 s += self.api_keys.write(&mut buf[s..])?;
@@ -441,7 +516,7 @@ pub mod responses {
         ///     api_key => INT16
         ///     min_version => INT16
         ///     max_version => INT16
-        #[derive(Debug, Clone)]
+        #[derive(Debug, Clone, Default)]
         pub struct ApiKey {
             pub api_key: ApiKeys,
             pub min_version: i16,
@@ -463,6 +538,33 @@ pub mod responses {
                 len += self._tagged_fields.write(buf)?;
                 Ok(len)
             }
+        }
+    }
+
+    pub mod fetch {
+        use super::*;
+
+        /// Fetch Response (Version: 16) => throttle_time_ms error_code session_id [responses] _tagged_fields
+        ///   throttle_time_ms => INT32
+        ///   error_code => INT16
+        ///   session_id => INT32
+        ///   responses => topic_id [partitions] _tagged_fields
+        ///     topic_id => UUID
+        ///     partitions => partition_index error_code high_watermark last_stable_offset log_start_offset [aborted_transactions] preferred_read_replica records _tagged_fields
+        ///       partition_index => INT32
+        ///       error_code => INT16
+        ///       high_watermark => INT64
+        ///       last_stable_offset => INT64
+        ///       log_start_offset => INT64
+        ///       aborted_transactions => producer_id first_offset _tagged_fields
+        ///         producer_id => INT64
+        ///         first_offset => INT64
+        ///       preferred_read_replica => INT32
+        ///       records => COMPACT_RECORDS
+        #[derive(Debug, Clone)]
+        pub struct Fetch {
+            throttle_time_ms: i32,
+            error_code: Option<ErrorCode>,
         }
     }
 }
