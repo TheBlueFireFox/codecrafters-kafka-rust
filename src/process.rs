@@ -1,14 +1,24 @@
 use crate::messages::{
     primitives::{CompactArray, Serialize, TaggedFields},
-    requests, responses, ApiKeys, ErrorCode,
+    requests,
+    responses::{self, api_version::ApiKey},
+    ApiKeys, ErrorCode,
 };
 
-const SUPPORTED_COMMANDS: [responses::ApiKey; 1] = [responses::ApiKey {
-    min_version: 4,
-    max_version: 4,
-    api_key: ApiKeys::ApiVersions,
-    _tagged_fields: TaggedFields{},
-}];
+const SUPPORTED_COMMANDS: [ApiKey; 2] = [
+    ApiKey {
+        api_key: ApiKeys::Fetch,
+        min_version: 16,
+        max_version: 16,
+        _tagged_fields: TaggedFields,
+    },
+    ApiKey {
+        min_version: 4,
+        max_version: 4,
+        api_key: ApiKeys::ApiVersions,
+        _tagged_fields: TaggedFields {},
+    },
+];
 
 pub fn process(msg: &[u8], msg_out: &mut [u8]) -> anyhow::Result<usize> {
     let req = requests::Request::try_from(msg)?;
@@ -24,29 +34,35 @@ fn handle_request(req: requests::Request) -> anyhow::Result<responses::Response>
         correlation_id: req.header.correlation_id,
     };
     let response = match req.request {
-        requests::RequestType::ApiVersions(_api) => {
-            let api = match req.header.request_api_version {
-                4 => responses::ApiVersions {
-                    error_code: None,
-                    api_keys: CompactArray {
-                        vec: SUPPORTED_COMMANDS.to_vec(),
-                    },
-                    throttle_time_ms: 0,
-                    _tagged_fields: TaggedFields {  },
-                },
-                _ => responses::ApiVersions {
-                    error_code: Some(ErrorCode::UnsupportedVersion),
-                    api_keys: CompactArray { vec: vec![] },
-                    throttle_time_ms: 0,
-                    _tagged_fields: TaggedFields {  },
-                },
-            };
-
-            responses::ResponseType::ApiVersions(api)
-        }
+        requests::RequestType::ApiVersions(api) => handle_api_version(req.header, api)?,
     };
 
     Ok(responses::Response { header, response })
+}
+
+fn handle_api_version(
+    header: requests::Header,
+    _api: requests::ApiVersions,
+) -> anyhow::Result<responses::ResponseType> {
+    use responses::api_version::*;
+    let api = match header.request_api_version {
+        4 => ApiVersions {
+            error_code: None,
+            api_keys: CompactArray {
+                vec: SUPPORTED_COMMANDS.to_vec(),
+            },
+            throttle_time_ms: 0,
+            _tagged_fields: TaggedFields {},
+        },
+        _ => ApiVersions {
+            error_code: Some(ErrorCode::UnsupportedVersion),
+            api_keys: CompactArray { vec: vec![] },
+            throttle_time_ms: 0,
+            _tagged_fields: TaggedFields {},
+        },
+    };
+
+    Ok(responses::ResponseType::ApiVersions(api))
 }
 
 #[test]

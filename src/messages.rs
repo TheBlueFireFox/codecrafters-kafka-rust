@@ -1,6 +1,7 @@
 #[derive(Debug, Clone, Copy)]
 #[repr(i16)]
 pub enum ApiKeys {
+    Fetch = 1,
     ApiVersions = 18,
 }
 
@@ -11,8 +12,6 @@ pub enum ErrorCode {
 }
 
 pub mod primitives {
-    use std::collections::HashMap;
-
     use bytes::Buf;
 
     #[derive(Debug, thiserror::Error, PartialEq)]
@@ -389,7 +388,7 @@ pub mod responses {
 
     #[derive(Debug, Clone)]
     pub enum ResponseType {
-        ApiVersions(ApiVersions),
+        ApiVersions(api_version::ApiVersions),
     }
 
     impl Serialize for ResponseType {
@@ -402,64 +401,68 @@ pub mod responses {
         }
     }
 
-    /// ApiVersions Response (Version: 3) => error_code [api_keys] throttle_time_ms _tagged_fields
-    ///   error_code => INT16
-    ///   api_keys => api_key min_version max_version _tagged_fields
-    ///     api_key => INT16
-    ///     min_version => INT16
-    ///     max_version => INT16
-    ///   throttle_time_ms => INT32
-    #[derive(Debug, Clone)]
-    pub struct ApiVersions {
-        pub error_code: Option<ErrorCode>,
-        pub api_keys: CompactArray<ApiKey>,
-        pub throttle_time_ms: i32,
-        pub _tagged_fields: TaggedFields,
-    }
+    pub mod api_version {
+        use super::*;
 
-    impl Serialize for ApiVersions {
-        type Error = SerializeError;
-
-        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-            (&mut buf[..]).put_i16(self.error_code.map(|s| s as i16).unwrap_or_default());
-            let mut s = 2;
-
-            s += self.api_keys.write(&mut buf[s..])?;
-
-            (&mut buf[s..]).put_i32(self.throttle_time_ms);
-            s += 4;
-
-            s += self._tagged_fields.write(&mut buf[s..])?;
-
-            Ok(s)
+        /// ApiVersions Response (Version: 3) => error_code [api_keys] throttle_time_ms _tagged_fields
+        ///   error_code => INT16
+        ///   api_keys => api_key min_version max_version _tagged_fields
+        ///     api_key => INT16
+        ///     min_version => INT16
+        ///     max_version => INT16
+        ///   throttle_time_ms => INT32
+        #[derive(Debug, Clone)]
+        pub struct ApiVersions {
+            pub error_code: Option<ErrorCode>,
+            pub api_keys: CompactArray<ApiKey>,
+            pub throttle_time_ms: i32,
+            pub _tagged_fields: TaggedFields,
         }
-    }
 
-    ///   api_keys => api_key min_version max_version _tagged_fields
-    ///     api_key => INT16
-    ///     min_version => INT16
-    ///     max_version => INT16
-    #[derive(Debug, Clone)]
-    pub struct ApiKey {
-        pub api_key: ApiKeys,
-        pub min_version: i16,
-        pub max_version: i16,
-        pub _tagged_fields: TaggedFields,
-    }
+        impl Serialize for ApiVersions {
+            type Error = SerializeError;
 
-    impl Serialize for ApiKey {
-        type Error = SerializeError;
+            fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+                (&mut buf[..]).put_i16(self.error_code.map(|s| s as i16).unwrap_or_default());
+                let mut s = 2;
 
-        fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
-            let len = buf.len();
-            buf.put_i16(self.api_key as i16);
-            buf.put_i16(self.min_version);
-            buf.put_i16(self.max_version);
+                s += self.api_keys.write(&mut buf[s..])?;
 
-            // _tagged_fields
-            let mut len = len - buf.remaining_mut();
-            len += self._tagged_fields.write(buf)?;
-            Ok(len)
+                (&mut buf[s..]).put_i32(self.throttle_time_ms);
+                s += 4;
+
+                s += self._tagged_fields.write(&mut buf[s..])?;
+
+                Ok(s)
+            }
+        }
+
+        ///   api_keys => api_key min_version max_version _tagged_fields
+        ///     api_key => INT16
+        ///     min_version => INT16
+        ///     max_version => INT16
+        #[derive(Debug, Clone)]
+        pub struct ApiKey {
+            pub api_key: ApiKeys,
+            pub min_version: i16,
+            pub max_version: i16,
+            pub _tagged_fields: TaggedFields,
+        }
+
+        impl Serialize for ApiKey {
+            type Error = SerializeError;
+
+            fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
+                let len = buf.len();
+                buf.put_i16(self.api_key as i16);
+                buf.put_i16(self.min_version);
+                buf.put_i16(self.max_version);
+
+                // _tagged_fields
+                let mut len = len - buf.remaining_mut();
+                len += self._tagged_fields.write(buf)?;
+                Ok(len)
+            }
         }
     }
 }
