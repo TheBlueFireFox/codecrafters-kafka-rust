@@ -26,7 +26,9 @@ pub mod primitives {
         #[error("Error size too large <{0}>")]
         SizeTooLarge(#[from] core::num::TryFromIntError),
         #[error("Invalid Utf8 String <{0}>")]
-        InvalidUtf8(#[from] std::str::Utf8Error),
+        InvalidUtf8Str(#[from] std::str::Utf8Error),
+        #[error("Invalid Utf8 String <{0}>")]
+        InvalidUtf8(#[from] std::string::FromUtf8Error),
     }
 
     pub trait Deserialize: Sized {
@@ -200,11 +202,17 @@ pub mod primitives {
         type Error = ParseError;
 
         fn parse(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
-            let (size, used) = UnsignedVarint::parse(buf)?;
-            let size = size.val as usize;
-            let s = std::str::from_utf8(&buf[used..][..size])?.to_string();
-            // -1 for the size as the unsigned varint is N + 1
-            Ok((Self { str: s }, used + size - 1))
+            let (arr, used) = CompactArray::parse(buf)?;
+            let s = Self {
+                str: String::from_utf8(arr.vec)?,
+            };
+
+            Ok((s, used))
+            // let (size, used) = UnsignedVarint::parse(buf)?;
+            // let size = size.val as usize;
+            // let s = std::str::from_utf8(&buf[used..][..size])?.to_string();
+            // // -1 for the size as the unsigned varint is N + 1
+            // Ok((Self { str: s }, used + size - 1))
         }
     }
 
@@ -225,13 +233,33 @@ pub mod primitives {
         }
     }
 
+    impl Deserialize for u8 {
+        type Error = ParseError;
+
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+            let len = buf.len();
+            let val = buf.get_u8();
+            Ok((val, len - buf.remaining()))
+        }
+    }
+
+    impl Deserialize for i32 {
+        type Error = ParseError;
+
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+            let len = buf.len();
+            let val = buf.get_i32();
+            Ok((val, len - buf.remaining()))
+        }
+    }
+
     impl<T: Serialize<Error = SerializeError>> Serialize for CompactArray<T> {
         type Error = SerializeError;
 
         fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-            let size = UnsignedVarint {
-                val: (self.vec.len() + 1) as u32,
-            };
+            // CompactArray format is N + 1
+            let size = self.vec.len() + 1;
+            let size = UnsignedVarint { val: size as u32 };
             let mut s = size.write(buf)?;
 
             for key in &self.vec {
@@ -247,8 +275,11 @@ pub mod primitives {
 
         fn parse(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
             let (count, mut used) = UnsignedVarint::parse(buf)?;
+
             let count = count.val as usize;
+
             let count = count.saturating_sub(1);
+
             if count == 0 {
                 return Ok((Self { vec: vec![] }, used));
             }
@@ -291,11 +322,8 @@ pub mod primitives {
         type Error = SerializeError;
 
         fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-            if buf[0] == 0 {
-                return Ok(1);
-            }
-
-            unimplemented!("The TaggedFields only support the empty variation")
+            buf[0] = 0;
+            Ok(1)
         }
     }
 
@@ -582,26 +610,7 @@ pub mod requests {
             fn parse(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
                 let (uuid, s) = Uuid::parse(buf)?;
 
-                struct I32 {
-                    val: i32,
-                }
-
-                impl Deserialize for I32 {
-                    type Error = ParseError;
-
-                    fn parse(mut buf: &[u8]) -> Result<(Self, usize), Self::Error> {
-                        let len = buf.len();
-                        let val = buf.get_i32();
-
-                        Ok((Self { val }, len - buf.remaining()))
-                    }
-                }
-
-                let (partitions, ss): (CompactArray<I32>, _) = CompactArray::parse(&buf[s..])?;
-
-                let partitions = CompactArray {
-                    vec: partitions.vec.into_iter().map(|s| s.val).collect(),
-                };
+                let (partitions, ss) = CompactArray::parse(&buf[s..])?;
 
                 let (_tagged_fields, sss) = TaggedFields::parse(&buf[s + ss..])?;
 
@@ -658,32 +667,53 @@ pub mod responses {
         type Error = SerializeError;
 
         fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
-            let s = self.header.write(&mut buf[4..])?;
-            let ss = self.response.write(&mut buf[4 + s..])?;
+            let mut s = 0;
+            s += self.header.write(&mut buf[4..])?;
+            s += self.response.write(&mut buf[4 + s..])?;
 
-            let size = s + ss;
+            buf.put_i32(s as i32);
 
-            buf.put_i32(size as _);
-
-            Ok(4 + size)
+            Ok(4 + s)
         }
     }
 
-    // Response Header v0 => correlation_id
+    // Response Header v1 => correlation_id _tagged_fields
     //   correlation_id => INT32
     #[derive(Debug, Clone)]
-    pub struct Header {
-        pub correlation_id: i32,
+    pub enum Header {
+        V0 {
+            correlation_id: i32,
+        },
+        V1 {
+            correlation_id: i32,
+            _tagged_fields: TaggedFields,
+        },
     }
 
     impl Serialize for Header {
         type Error = SerializeError;
 
         fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
-            let len = buf.len();
-            buf.put_i32(self.correlation_id);
+            match self {
+                Header::V0 { correlation_id } => {
+                    let len = buf.len();
+                    buf.put_i32(*correlation_id);
+                    let s = len - buf.remaining_mut();
 
-            Ok(len - buf.remaining_mut())
+                    Ok(s)
+                }
+                Header::V1 {
+                    correlation_id,
+                    _tagged_fields,
+                } => {
+                    let len = buf.len();
+                    buf.put_i32(*correlation_id);
+                    let mut s = len - buf.remaining_mut();
+                    s += _tagged_fields.write(buf)?;
+
+                    Ok(s)
+                }
+            }
         }
     }
 
@@ -805,14 +835,17 @@ pub mod responses {
 
             fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
                 let len = buf.len();
+
                 buf.put_i32(self.throttle_time_ms);
                 buf.put_i16(self.error_code as i16);
                 buf.put_i32(self.session_id);
-                let mut s = len - buf.remaining_mut();
-                s += self.responses.write(buf)?;
-                s += self._tagged_fields.write(&mut buf[s..])?;
 
-                Ok(s)
+                let diff = len - buf.remaining_mut();
+
+                let s = self.responses.write(buf)?;
+                let ss = self._tagged_fields.write(&mut buf[s..])?;
+
+                Ok(diff + s + ss)
             }
         }
 
