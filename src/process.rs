@@ -30,28 +30,43 @@ pub fn process(msg: &[u8], msg_out: &mut [u8]) -> anyhow::Result<usize> {
 }
 
 fn handle_request(req: requests::Request) -> anyhow::Result<responses::Response> {
+    use responses::ResponseType;
     let header = responses::Header {
         correlation_id: req.header.correlation_id,
     };
     let response = match req.request {
-        requests::RequestType::Fetch(fetch) => handle_fetch(req.header, fetch)?,
-        requests::RequestType::ApiVersions(api) => handle_api_version(req.header, api)?,
+        requests::RequestType::Fetch(fetch) => {
+            handle_fetch(req.header, fetch).map(ResponseType::Fetch)?
+        }
+        requests::RequestType::ApiVersions(api) => {
+            handle_api_version(req.header, api).map(ResponseType::ApiVersions)?
+        }
     };
 
     Ok(responses::Response { header, response })
 }
 
 fn handle_fetch(
-    _header: requests::Header,
+    header: requests::Header,
     _fetch: requests::fetch::Fetch,
-) -> anyhow::Result<responses::ResponseType> {
-    todo!()
+) -> anyhow::Result<responses::fetch::Fetch> {
+    use responses::fetch::*;
+    if header.request_api_version != 16 {
+        return Ok(Fetch {
+            error_code: ErrorCode::UnsupportedVersion,
+            ..Default::default()
+        });
+    }
+
+    Ok(Fetch {
+        ..Default::default()
+    })
 }
 
 fn handle_api_version(
     header: requests::Header,
     _api: requests::api_versions::ApiVersions,
-) -> anyhow::Result<responses::ResponseType> {
+) -> anyhow::Result<responses::api_version::ApiVersions> {
     use responses::api_version::*;
     let api = match header.request_api_version {
         4 => ApiVersions {
@@ -66,11 +81,11 @@ fn handle_api_version(
         },
     };
 
-    Ok(responses::ResponseType::ApiVersions(api))
+    Ok(api)
 }
 
 #[test]
-fn test_full_parse() {
+fn test_full_parse_api_version() {
     let arr = [
         0x00, 0x00, 0x00, 0x23, // len = 0x23 => 35
         0x00, 0x12, // request_api_key = 0x12 => 18
@@ -103,7 +118,32 @@ fn test_full_parse() {
         0x00, // _tagged_fields
     ];
 
-    let mut buf = [0; 100];
+    let mut buf = [0; 1000];
     let len = process(&arr, &mut buf).expect("unable to extract");
     assert_eq!(exp, &buf[..len]);
+}
+
+#[test]
+fn test_full_parse_fetch() {
+    let arr = [
+        0x00, 0x00, 0x00, 0x30, // len
+        0x00, 0x01, // request_api_key = 0x01
+        0x00, 0x10, // request_api_version = 16
+        0x1a, 0xf6, 0xe0, 0x6e, // correlation_id
+        0x00, 0x0c, // client_id 
+        0x6b, 0x61, 0x66, 0x6b, 0x61, 0x2d, 0x74, 0x65, 0x73, 0x74, 0x65, 0x72, // kafka-tester
+        0x00, // _tagged_fields
+        0x00, 0x00, 0x01, 0xf4, // max_wait_ms 
+        0x00, 0x00, 0x00, 0x01, // min_bytes 
+        0x03, 0x20, 0x00, 0x00, // max_bytes
+        0x00, // isolation_level
+        0x00, 0x00, 0x00, 0x00, // session_id
+        0x00, 0x00, 0x00, 0x00, // session_epoch 
+        // topic count
+         // forgotten_topics_data count
+        0x01, 0x01, 0x01, 
+        0x00, // _tagged_fields
+    ];
+    let mut buf = [0; 1000];
+    let len = process(&arr, &mut buf).expect("unable to extract");
 }
