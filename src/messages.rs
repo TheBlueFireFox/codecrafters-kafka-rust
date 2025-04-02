@@ -14,6 +14,7 @@ pub enum ErrorCode {
     #[default]
     NoError = 0,
     UnsupportedVersion = 35,
+    UnknownTopic = 100,
 }
 
 pub mod primitives {
@@ -137,7 +138,7 @@ pub mod primitives {
         assert_eq!(exp, buf);
     }
 
-    #[derive(Debug, Clone, Default)]
+    #[derive(Debug, Copy, Clone, Default)]
     pub struct Uuid {
         pub uuid: u128,
     }
@@ -162,8 +163,11 @@ pub mod primitives {
         type Error = SerializeError;
 
         fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
+            const LEN: usize = std::mem::size_of::<u128>();
+
             buf.put_u128(self.uuid);
-            Ok(std::mem::size_of::<u128>())
+
+            Ok(LEN)
         }
     }
 
@@ -330,9 +334,7 @@ pub mod primitives {
     /// Represents a sequence of Kafka records as COMPACT_NULLABLE_BYTES. For a detailed
     /// description of records see Message Sets.
     #[derive(Debug, Clone, Default)]
-    pub struct CompactRecords {
-        //
-    }
+    pub struct CompactRecords {}
 
     impl Serialize for CompactRecords {
         type Error = SerializeError;
@@ -475,7 +477,7 @@ pub mod requests {
             pub isolation_level: i8,
             pub session_id: i32,
             pub session_epoch: i32,
-            pub topics: CompactArray<Topics>,
+            pub topics: CompactArray<Topic>,
             pub forgotten_topics_data: CompactArray<ForgottenTopicsData>,
             pub rack_id: CompactString,
             pub _tagged_fields: TaggedFields,
@@ -494,9 +496,13 @@ pub mod requests {
                 let session_epoch = buf.get_i32();
 
                 let len = len - buf.remaining();
+
                 let (topics, s) = CompactArray::parse(buf)?;
+
                 let (forgotten_topics_data, ss) = CompactArray::parse(&buf[s..])?;
+
                 let (rack_id, sss) = CompactString::parse(&buf[s + ss..])?;
+
                 let (_tagged_fields, ssss) = TaggedFields::parse(&buf[s + ss + sss..])?;
 
                 let fetch = Self {
@@ -526,13 +532,13 @@ pub mod requests {
         ///       log_start_offset => INT64
         ///       partition_max_bytes => INT32
         #[derive(Debug, Clone)]
-        pub struct Topics {
+        pub struct Topic {
             pub topic_id: Uuid,
-            pub partitions: CompactArray<Partitions>,
+            pub partitions: CompactArray<Partition>,
             pub _tagged_fields: TaggedFields,
         }
 
-        impl Deserialize for Topics {
+        impl Deserialize for Topic {
             type Error = ParseError;
 
             fn parse(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
@@ -558,7 +564,7 @@ pub mod requests {
         ///       log_start_offset => INT64
         ///       partition_max_bytes => INT32
         #[derive(Debug, Clone, Default)]
-        pub struct Partitions {
+        pub struct Partition {
             pub partition: i32,
             pub current_leader_epoch: i32,
             pub fetch_offset: i64,
@@ -568,11 +574,12 @@ pub mod requests {
             pub _tagged_fields: TaggedFields,
         }
 
-        impl Deserialize for Partitions {
+        impl Deserialize for Partition {
             type Error = ParseError;
 
             fn parse(mut buf: &[u8]) -> Result<(Self, usize), Self::Error> {
                 let len = buf.len();
+
                 let partition = buf.get_i32();
                 let current_leader_epoch = buf.get_i32();
                 let fetch_offset = buf.get_i64();
@@ -580,7 +587,10 @@ pub mod requests {
                 let log_start_offset = buf.get_i64();
                 let partition_max_bytes = buf.get_i32();
 
+                let len = len - buf.remaining();
+
                 let (_tagged_fields, s) = TaggedFields::parse(buf)?;
+
                 let p = Self {
                     partition,
                     current_leader_epoch,
@@ -590,7 +600,8 @@ pub mod requests {
                     partition_max_bytes,
                     _tagged_fields,
                 };
-                Ok((p, len - buf.remaining() - s))
+
+                Ok((p, len + s))
             }
         }
 
@@ -677,8 +688,10 @@ pub mod responses {
         }
     }
 
-    // Response Header v1 => correlation_id _tagged_fields
-    //   correlation_id => INT32
+    /// Response Header v0 => correlation_id
+    ///   correlation_id => INT32
+    /// Response Header v1 => correlation_id _tagged_fields
+    ///   correlation_id => INT32
     #[derive(Debug, Clone)]
     pub enum Header {
         V0 {
@@ -826,7 +839,7 @@ pub mod responses {
             pub throttle_time_ms: i32,
             pub error_code: ErrorCode,
             pub session_id: i32,
-            pub responses: CompactArray<Responses>,
+            pub responses: CompactArray<Response>,
             pub _tagged_fields: TaggedFields,
         }
 
@@ -863,17 +876,19 @@ pub mod responses {
         ///       preferred_read_replica => INT32
         ///       records => COMPACT_RECORDS
         #[derive(Debug, Clone, Default)]
-        pub struct Responses {
+        pub struct Response {
             pub topic_id: Uuid,
-            pub partitions: Partitions,
+            pub partitions: CompactArray<Partition>,
+            pub _tagged_fields: TaggedFields,
         }
 
-        impl Serialize for Responses {
+        impl Serialize for Response {
             type Error = SerializeError;
 
             fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
                 let mut s = self.topic_id.write(buf)?;
                 s += self.partitions.write(&mut buf[s..])?;
+                s += self._tagged_fields.write(&mut buf[s..])?;
                 Ok(s)
             }
         }
@@ -890,7 +905,7 @@ pub mod responses {
         ///       preferred_read_replica => INT32
         ///       records => COMPACT_RECORDS
         #[derive(Debug, Clone, Default)]
-        pub struct Partitions {
+        pub struct Partition {
             pub partition_index: i32,
             pub error_code: ErrorCode,
             pub high_watermark: i64,
@@ -902,7 +917,7 @@ pub mod responses {
             pub _tagged_fields: TaggedFields,
         }
 
-        impl Serialize for Partitions {
+        impl Serialize for Partition {
             type Error = SerializeError;
 
             fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
@@ -941,6 +956,8 @@ pub mod responses {
                 let len = buf.len();
                 buf.put_i64(self.producer_id);
                 buf.put_i64(self.first_offset);
+
+                let len = len - buf.remaining_mut();
                 let s = self._tagged_fields.write(buf)?;
 
                 Ok(len + s)
