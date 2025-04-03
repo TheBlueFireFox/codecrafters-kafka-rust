@@ -24,6 +24,10 @@ pub mod primitives {
     pub enum ParseError {
         #[error("Invalid buffer size <{0}> expected <{1}>")]
         InvalidSize(usize, usize),
+        #[error("Varint is larger then expected")]
+        InvalidVarint,
+        #[error("Varlong is larger then expected")]
+        InvalidVarlong,
         #[error("Error size too large <{0}>")]
         SizeTooLarge(#[from] core::num::TryFromIntError),
         #[error("Invalid Utf8 String <{0}>")]
@@ -61,7 +65,7 @@ pub mod primitives {
             const MASK_MSB: u8 = 0x01 << 7;
             const MASK: u8 = !MASK_MSB;
 
-            loop {
+            while s < std::mem::size_of::<u32>() {
                 let m = (v[s] & MASK) as u32;
                 res |= m << (7 * s);
 
@@ -69,6 +73,9 @@ pub mod primitives {
                     break;
                 }
                 s += 1;
+            }
+            if s > std::mem::size_of::<u32>() {
+                return Err(ParseError::InvalidVarint);
             }
 
             Ok((Self { val: res }, s + 1))
@@ -136,6 +143,70 @@ pub mod primitives {
         let got = org.write(&mut buf);
         assert_eq!(Ok(4), got);
         assert_eq!(exp, buf);
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct UnsignedVarlong {
+        pub val: u64,
+    }
+
+    impl Deserialize for UnsignedVarlong {
+        type Error = ParseError;
+
+        fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
+            let mut s = 0;
+            let mut res = 0;
+
+            const MASK_MSB: u8 = 0x01 << 7;
+            const MASK: u8 = !MASK_MSB;
+
+            while s < std::mem::size_of::<u64>() {
+                let m = (v[s] & MASK) as u64;
+                res |= m << (7 * s);
+
+                if v[s] & MASK_MSB == 0 {
+                    break;
+                }
+                s += 1;
+            }
+            if s > std::mem::size_of::<u64>() {
+                return Err(ParseError::InvalidVarint);
+            }
+
+            Ok((Self { val: res }, s + 1))
+        }
+    }
+
+    impl Serialize for UnsignedVarlong {
+        type Error = SerializeError;
+
+        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            const MASK_MSB: u8 = 0x80;
+            const MASK: u8 = !MASK_MSB;
+
+            // ex: 0x01 0x00 0x00 0x01
+            // => 0b1000_0001
+            // 0b_1000_0001 0b1000_0000 0b1000_0000 0b0000_0001
+            let mut count = 0;
+            let mut val = self.val;
+            loop {
+                let mut b = val & (MASK as u64);
+
+                val >>= 7;
+
+                if val > 0 {
+                    b |= 0x80;
+                }
+
+                buf[count] = b as u8;
+
+                count += 1;
+
+                if val == 0 {
+                    break Ok(count);
+                }
+            }
+        }
     }
 
     #[derive(Debug, Copy, Clone, Default)]
@@ -333,8 +404,48 @@ pub mod primitives {
 
     /// Represents a sequence of Kafka records as COMPACT_NULLABLE_BYTES. For a detailed
     /// description of records see Message Sets.
+    /// baseOffset: int64
+    /// batchLength: int32
+    /// partitionLeaderEpoch: int32
+    /// magic: int8 (current magic value is 2)
+    /// crc: uint32
+    /// attributes: int16
+    ///     bit 0~2:
+    ///         0: no compression
+    ///         1: gzip
+    ///         2: snappy
+    ///         3: lz4
+    ///         4: zstd
+    ///     bit 3: timestampType
+    ///     bit 4: isTransactional (0 means not transactional)
+    ///     bit 5: isControlBatch (0 means not a control batch)
+    ///     bit 6: hasDeleteHorizonMs (0 means baseTimestamp is not set as the delete horizon for compaction)
+    ///     bit 7~15: unused
+    /// lastOffsetDelta: int32
+    /// baseTimestamp: int64
+    /// maxTimestamp: int64
+    /// producerId: int64
+    /// producerEpoch: int16
+    /// baseSequence: int32
+    /// recordsCount: int32
+    /// records: [Record]
     #[derive(Debug, Clone, Default)]
-    pub struct CompactRecords {}
+    pub struct CompactRecords {
+        pub base_offset: i64,
+        pub batch_length: i32,
+        pub partition_leader_epoch: i32,
+        pub magic: i8,
+        pub crc: u32,
+        pub attributes: RecordsAttribute,
+        pub last_offset_delta: i32,
+        pub base_timestamp: i64,
+        pub max_timestamp: i64,
+        pub producer_id: i64,
+        pub producer_epoch: i16,
+        pub base_sequence: i32,
+        pub records_count: i32,
+        pub records: CompactArray<Record>,
+    }
 
     impl Serialize for CompactRecords {
         type Error = SerializeError;
@@ -344,6 +455,11 @@ pub mod primitives {
             Ok(1)
         }
     }
+
+    #[derive(Debug, Clone, Default)]
+    pub struct RecordsAttribute {}
+    #[derive(Debug, Clone, Default)]
+    pub struct Record {}
 }
 
 pub mod requests {
@@ -681,7 +797,6 @@ pub mod responses {
             let mut s = 0;
             s += self.header.write(&mut buf[4..])?;
             s += self.response.write(&mut buf[4 + s..])?;
-
             buf.put_i32(s as i32);
 
             Ok(4 + s)
