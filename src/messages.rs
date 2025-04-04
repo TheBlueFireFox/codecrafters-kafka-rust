@@ -50,7 +50,7 @@ pub mod primitives {
     #[derive(Debug, Clone, thiserror::Error, PartialEq)]
     pub enum SerializeError {}
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
     pub struct UnsignedVarint {
         pub val: u32,
     }
@@ -145,7 +145,7 @@ pub mod primitives {
         assert_eq!(exp, buf);
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
     pub struct UnsignedVarlong {
         pub val: u64,
     }
@@ -401,6 +401,17 @@ pub mod primitives {
             Ok(1)
         }
     }
+}
+
+pub mod disk {
+    use bytes::Buf;
+
+    use super::primitives::{
+        CompactArray, Deserialize, ParseError, Serialize, SerializeError, UnsignedVarint,
+        UnsignedVarlong,
+    };
+
+    pub type CompactRecords = CompactArray<RecordBatch>;
 
     /// Represents a sequence of Kafka records as COMPACT_NULLABLE_BYTES. For a detailed
     /// description of records see Message Sets.
@@ -430,7 +441,7 @@ pub mod primitives {
     /// recordsCount: int32
     /// records: [Record]
     #[derive(Debug, Clone, Default)]
-    pub struct CompactRecords {
+    pub struct RecordBatch {
         pub base_offset: i64,
         pub batch_length: i32,
         pub partition_leader_epoch: i32,
@@ -447,19 +458,192 @@ pub mod primitives {
         pub records: CompactArray<Record>,
     }
 
-    impl Serialize for CompactRecords {
+    impl Deserialize for RecordBatch {
+        type Error = ParseError;
+
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+            let len = buf.len();
+
+            let base_offset = buf.get_i64();
+            let batch_length = buf.get_i32();
+            let partition_leader_epoch = buf.get_i32();
+            let magic = buf.get_i8();
+            let crc = buf.get_u32();
+            let (attributes, s) = RecordsAttribute::parse(buf)?;
+            buf.advance(s);
+
+            let last_offset_delta = buf.get_i32();
+            let base_timestamp = buf.get_i64();
+            let max_timestamp = buf.get_i64();
+            let producer_id = buf.get_i64();
+            let producer_epoch = buf.get_i16();
+            let base_sequence = buf.get_i32();
+            let records_count = buf.get_i32();
+            let (records, s) = CompactArray::parse(buf)?;
+
+            buf.advance(s);
+
+            let s = Self {
+                base_offset,
+                batch_length,
+                partition_leader_epoch,
+                magic,
+                crc,
+                attributes,
+                last_offset_delta,
+                base_timestamp,
+                max_timestamp,
+                producer_id,
+                producer_epoch,
+                base_sequence,
+                records_count,
+                records,
+            };
+            Ok((s, len - buf.remaining()))
+        }
+    }
+
+    impl Serialize for RecordBatch {
         type Error = SerializeError;
 
-        fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
-            buf.put_u8(0);
-            Ok(1)
+        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            todo!()
+        }
+    }
+
+    /// attributes: int16
+    ///     bit 0-2:
+    ///         0: no compression
+    ///         1: gzip
+    ///         2: snappy
+    ///         3: lz4
+    ///         4: zstd
+    ///     bit 3: timestampType
+    ///     bit 4: isTransactional (0 means not transactional)
+    ///     bit 5: isControlBatch (0 means not a control batch)
+    ///     bit 6: hasDeleteHorizonMs (0 means baseTimestamp is not set as the delete horizon for compaction)
+    ///     bit 7-15: unused
+    #[derive(Debug, Clone, Default)]
+    pub struct RecordsAttribute {
+        pub val: i16,
+    }
+
+    impl RecordsAttribute {
+        pub fn compression(&self) -> RecordsCompression {
+            let p = self.val & 0b11;
+            match p {
+                0b00 => RecordsCompression::NoCompression,
+                0b01 => RecordsCompression::Gzip,
+                0b10 => RecordsCompression::Snappy,
+                0b11 => RecordsCompression::Lz4,
+                _ => unreachable!("this branch should never be reached"),
+            }
+        }
+
+        pub fn timestamp_type(&self) -> bool {
+            (self.val & 0b100) > 1
+        }
+
+        pub fn is_transactional(&self) -> bool {
+            (self.val & 0b1000) > 1
+        }
+
+        pub fn is_control_batch(&self) -> bool {
+            (self.val & 0b1_0000) > 1
+        }
+
+        pub fn has_delete_horizon_ms(&self) -> bool {
+            (self.val & 0b10_0000) > 1
+        }
+    }
+
+    impl Deserialize for RecordsAttribute {
+        type Error = ParseError;
+
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+            let val = buf.get_i16();
+            Ok((Self { val }, 2))
         }
     }
 
     #[derive(Debug, Clone, Default)]
-    pub struct RecordsAttribute {}
+    pub enum RecordsCompression {
+        #[default]
+        NoCompression,
+        Gzip,
+        Snappy,
+        Lz4,
+        Zstd,
+    }
+
+    /// length: varint
+    /// attributes: int8
+    ///     bit 0~7: unused
+    /// timestampDelta: varlong
+    /// offsetDelta: varint
+    /// keyLength: varint
+    /// key: byte[]
+    /// valueLength: varint
+    /// value: byte[]
+    /// headersCount: varint
+    /// Headers => [Header]
     #[derive(Debug, Clone, Default)]
-    pub struct Record {}
+    pub struct Record {
+        pub length: UnsignedVarint,
+        pub attributes: i8,
+        pub timestamp_delta: UnsignedVarlong,
+        pub offset_delta: UnsignedVarint,
+        pub key_length: UnsignedVarint,
+        pub key: Vec<u8>,
+        pub value_length: UnsignedVarint,
+        pub value: Vec<u8>,
+        pub headers_count: UnsignedVarint,
+        pub headers: CompactArray<RecordHeader>,
+    }
+
+    impl Serialize for Record {
+        type Error = SerializeError;
+
+        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            todo!()
+        }
+    }
+
+    impl Deserialize for Record {
+        type Error = ParseError;
+
+        fn parse(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+            todo!()
+        }
+    }
+
+    /// headerKeyLength: varint
+    /// headerKey: String
+    /// headerValueLength: varint
+    /// Value: byte[]
+    #[derive(Debug, Clone, Default)]
+    pub struct RecordHeader {
+        pub header_key_length: UnsignedVarint,
+        pub header_key: String,
+        pub header_value_length: UnsignedVarint,
+        pub value: Vec<u8>,
+    }
+
+    impl Deserialize for RecordHeader {
+        type Error = ParseError;
+
+        fn parse(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+            todo!()
+        }
+    }
+
+    impl Serialize for RecordHeader {
+        type Error = SerializeError;
+
+        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            todo!()
+        }
+    }
 }
 
 pub mod requests {
@@ -490,13 +674,13 @@ pub mod requests {
             let request_api_version = buf.get_i16();
             let correlation_id = buf.get_i32();
 
-            let rem = len - buf.remaining();
             let (client_id, s) = NullableString::parse(buf)?;
+            buf.advance(s);
 
-            let len = rem + s;
-            let (_tagged_fields, s) = TaggedFields::parse(&buf[s..])?;
+            let (_tagged_fields, s) = TaggedFields::parse(buf)?;
+            buf.advance(s);
 
-            let len = len + s;
+            let len = len - buf.remaining();
 
             Ok((
                 Self {
@@ -534,7 +718,8 @@ pub mod requests {
             }
 
             let (header, s) = Header::parse(buf)?;
-            let (rt, _ss) = RequestType::parse(header.request_api_key, &buf[s..])?;
+            buf.advance(s);
+            let (rt, _ss) = RequestType::parse(header.request_api_key, buf)?;
 
             Ok(Self {
                 header,
@@ -611,15 +796,19 @@ pub mod requests {
                 let session_id = buf.get_i32();
                 let session_epoch = buf.get_i32();
 
-                let len = len - buf.remaining();
-
                 let (topics, s) = CompactArray::parse(buf)?;
+                buf.advance(s);
 
-                let (forgotten_topics_data, ss) = CompactArray::parse(&buf[s..])?;
+                let (forgotten_topics_data, s) = CompactArray::parse(buf)?;
+                buf.advance(s);
 
-                let (rack_id, sss) = CompactString::parse(&buf[s + ss..])?;
+                let (rack_id, s) = CompactString::parse(buf)?;
+                buf.advance(s);
 
-                let (_tagged_fields, ssss) = TaggedFields::parse(&buf[s + ss + sss..])?;
+                let (_tagged_fields, s) = TaggedFields::parse(buf)?;
+                buf.advance(s);
+
+                let len = len - buf.remaining();
 
                 let fetch = Self {
                     max_wait_ms,
@@ -634,7 +823,7 @@ pub mod requests {
                     _tagged_fields,
                 };
 
-                Ok((fetch, len + s + ss + sss + ssss))
+                Ok((fetch, len))
             }
         }
 
@@ -657,10 +846,17 @@ pub mod requests {
         impl Deserialize for Topic {
             type Error = ParseError;
 
-            fn parse(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+            fn parse(mut buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+                let len = buf.len();
+
                 let (topic_id, s) = Uuid::parse(buf)?;
-                let (partitions, ss) = CompactArray::parse(&buf[s..])?;
-                let (_tagged_fields, sss) = TaggedFields::parse(&buf[s + ss..])?;
+                buf.advance(s);
+
+                let (partitions, s) = CompactArray::parse(buf)?;
+                buf.advance(s);
+
+                let (_tagged_fields, s) = TaggedFields::parse(buf)?;
+                buf.advance(s);
 
                 let topics = Self {
                     topic_id,
@@ -668,7 +864,7 @@ pub mod requests {
                     _tagged_fields,
                 };
 
-                Ok((topics, s + ss + sss))
+                Ok((topics, len - buf.remaining()))
             }
         }
 
@@ -703,9 +899,8 @@ pub mod requests {
                 let log_start_offset = buf.get_i64();
                 let partition_max_bytes = buf.get_i32();
 
-                let len = len - buf.remaining();
-
                 let (_tagged_fields, s) = TaggedFields::parse(buf)?;
+                buf.advance(s);
 
                 let p = Self {
                     partition,
@@ -717,7 +912,7 @@ pub mod requests {
                     _tagged_fields,
                 };
 
-                Ok((p, len + s))
+                Ok((p, len - buf.remaining()))
             }
         }
 
@@ -734,12 +929,17 @@ pub mod requests {
         impl Deserialize for ForgottenTopicsData {
             type Error = ParseError;
 
-            fn parse(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+            fn parse(mut buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+                let len = buf.len();
+
                 let (uuid, s) = Uuid::parse(buf)?;
+                buf.advance(s);
 
-                let (partitions, ss) = CompactArray::parse(&buf[s..])?;
+                let (partitions, s) = CompactArray::parse(buf)?;
+                buf.advance(s);
 
-                let (_tagged_fields, sss) = TaggedFields::parse(&buf[s + ss..])?;
+                let (_tagged_fields, s) = TaggedFields::parse(buf)?;
+                buf.advance(s);
 
                 Ok((
                     Self {
@@ -747,7 +947,7 @@ pub mod requests {
                         partitions,
                         _tagged_fields,
                     },
-                    s + ss + sss,
+                    len - buf.remaining(),
                 ))
             }
         }
@@ -928,7 +1128,8 @@ pub mod responses {
     }
 
     pub mod fetch {
-        use crate::messages::primitives::{CompactRecords, Uuid};
+        use crate::messages::disk::CompactRecords;
+        use crate::messages::primitives::Uuid;
 
         use super::*;
 

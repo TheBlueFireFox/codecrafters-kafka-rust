@@ -68,6 +68,7 @@ mod fetch {
         header: requests::Header,
         fetch_request: requests::fetch::Fetch,
     ) -> anyhow::Result<responses::fetch::Fetch> {
+
         if header.request_api_version != 16 {
             return Ok(Fetch {
                 session_id: fetch_request.session_id,
