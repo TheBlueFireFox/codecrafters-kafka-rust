@@ -50,81 +50,89 @@ pub mod primitives {
     #[derive(Debug, Clone, thiserror::Error, PartialEq)]
     pub enum SerializeError {}
 
-    #[derive(Debug, Clone, PartialEq, Eq, Default)]
-    pub struct UnsignedVarint {
-        pub val: u32,
-    }
-
-    impl Deserialize for UnsignedVarint {
-        type Error = ParseError;
-
-        fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
-            let mut s = 0;
-            let mut res = 0;
-
-            const MASK_MSB: u8 = 0x01 << 7;
-            const MASK: u8 = !MASK_MSB;
-
-            while s < std::mem::size_of::<u32>() {
-                let m = (v[s] & MASK) as u32;
-                res |= m << (7 * s);
-
-                if v[s] & MASK_MSB == 0 {
-                    break;
-                }
-                s += 1;
-            }
-            if s > std::mem::size_of::<u32>() {
-                return Err(ParseError::InvalidVarint);
+    macro_rules! VariableInt {
+        ( ($t:ident, $i:ident) ) => {
+            #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+            pub struct $t {
+                pub val: $i,
             }
 
-            Ok((Self { val: res }, s + 1))
-        }
-    }
+            impl Deserialize for $t {
+                type Error = ParseError;
 
-    impl Serialize for UnsignedVarint {
-        type Error = SerializeError;
+                fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
+                    let mut s = 0;
+                    let mut res = 0;
 
-        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-            const MASK_MSB: u8 = 0x80;
-            const MASK: u8 = !MASK_MSB;
+                    const MASK_MSB: u8 = 0x01 << 7;
+                    const MASK: u8 = !MASK_MSB;
 
-            // ex: 0x01 0x00 0x00 0x01
-            // => 0b1000_0001
-            // 0b_1000_0001 0b1000_0000 0b1000_0000 0b0000_0001
-            let mut count = 0;
-            let mut val = self.val;
-            loop {
-                let mut b = val & (MASK as u32);
+                    loop {
+                        if s > std::mem::size_of::<$i>() {
+                            return Err(ParseError::InvalidVarint);
+                        }
 
-                val >>= 7;
+                        let m = (v[s] & MASK) as $i;
+                        res |= m << (7 * s);
 
-                if val > 0 {
-                    b |= 0x80;
-                }
+                        if v[s] & MASK_MSB == 0 {
+                            break;
+                        }
+                        s += 1;
+                    }
 
-                buf[count] = b as u8;
-
-                count += 1;
-
-                if val == 0 {
-                    break Ok(count);
+                    Ok((Self { val: res }, s + 1))
                 }
             }
-        }
+
+            impl Serialize for $t {
+                type Error = SerializeError;
+
+                fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+                    const MASK_MSB: u8 = 0x80;
+                    const MASK: u8 = !MASK_MSB;
+
+                    // ex: 0x01 0x00 0x00 0x01
+                    // => 0b1000_0001
+                    // 0b_1000_0001 0b1000_0000 0b1000_0000 0b0000_0001
+                    let mut count = 0;
+                    let mut val = self.val;
+                    loop {
+                        let mut b = val & (MASK as $i);
+
+                        val >>= 7;
+
+                        if val > 0 {
+                            b |= 0x80;
+                        }
+
+                        buf[count] = b as u8;
+
+                        count += 1;
+
+                        if val == 0 {
+                            break Ok(count);
+                        }
+                    }
+                }
+            }
+        };
     }
+
+    VariableInt!((Varint, i32));
+    VariableInt!((Varlong, i64));
 
     #[test]
     fn test_deserialize_unsigned_varint() {
         let org = [0b10010110, 0b00000001];
-        let exp = Ok((UnsignedVarint { val: 150 }, 2));
-        let got = UnsignedVarint::parse(&org);
+        let exp = Ok((Varint { val: 150 }, 2));
+        let got = Varint::parse(&org);
         assert_eq!(exp, got);
     }
 
     #[test]
     fn test_serialize_unsigned_varint_a() {
-        let org = UnsignedVarint { val: 150 };
+        let org = Varint { val: 150 };
 
         let mut buf = [0; 4];
         let exp = [0b10010110, 0b00000001];
@@ -135,7 +143,7 @@ pub mod primitives {
 
     #[test]
     fn test_serialize_unsigned_varint_b() {
-        let org = UnsignedVarint { val: 0x01_00_00_01 };
+        let org = Varint { val: 0x01_00_00_01 };
 
         let mut buf = [0; 4];
         let exp = [0b1000_0001, 0b1000_0000, 0b1000_0000, 0b0000_1000];
@@ -143,70 +151,6 @@ pub mod primitives {
         let got = org.write(&mut buf);
         assert_eq!(Ok(4), got);
         assert_eq!(exp, buf);
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq, Default)]
-    pub struct UnsignedVarlong {
-        pub val: u64,
-    }
-
-    impl Deserialize for UnsignedVarlong {
-        type Error = ParseError;
-
-        fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
-            let mut s = 0;
-            let mut res = 0;
-
-            const MASK_MSB: u8 = 0x01 << 7;
-            const MASK: u8 = !MASK_MSB;
-
-            while s < std::mem::size_of::<u64>() {
-                let m = (v[s] & MASK) as u64;
-                res |= m << (7 * s);
-
-                if v[s] & MASK_MSB == 0 {
-                    break;
-                }
-                s += 1;
-            }
-            if s > std::mem::size_of::<u64>() {
-                return Err(ParseError::InvalidVarint);
-            }
-
-            Ok((Self { val: res }, s + 1))
-        }
-    }
-
-    impl Serialize for UnsignedVarlong {
-        type Error = SerializeError;
-
-        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-            const MASK_MSB: u8 = 0x80;
-            const MASK: u8 = !MASK_MSB;
-
-            // ex: 0x01 0x00 0x00 0x01
-            // => 0b1000_0001
-            // 0b_1000_0001 0b1000_0000 0b1000_0000 0b0000_0001
-            let mut count = 0;
-            let mut val = self.val;
-            loop {
-                let mut b = val & (MASK as u64);
-
-                val >>= 7;
-
-                if val > 0 {
-                    b |= 0x80;
-                }
-
-                buf[count] = b as u8;
-
-                count += 1;
-
-                if val == 0 {
-                    break Ok(count);
-                }
-            }
-        }
     }
 
     #[derive(Debug, Copy, Clone, Default)]
@@ -334,7 +278,7 @@ pub mod primitives {
         fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
             // CompactArray format is N + 1
             let size = self.vec.len() + 1;
-            let size = UnsignedVarint { val: size as u32 };
+            let size = Varint { val: size as i32 };
             let mut s = size.write(buf)?;
 
             for key in &self.vec {
@@ -349,7 +293,7 @@ pub mod primitives {
         type Error = ParseError;
 
         fn parse(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
-            let (count, mut used) = UnsignedVarint::parse(buf)?;
+            let (count, mut used) = Varint::parse(buf)?;
 
             let count = count.val as usize;
 
@@ -407,11 +351,50 @@ pub mod disk {
     use bytes::Buf;
 
     use super::primitives::{
-        CompactArray, Deserialize, ParseError, Serialize, SerializeError, UnsignedVarint,
-        UnsignedVarlong,
+        CompactArray, Deserialize, ParseError, Serialize, SerializeError, Varint, Varlong,
     };
 
-    pub type CompactRecords = CompactArray<RecordBatch>;
+    #[derive(Debug, Clone, Default)]
+    pub struct CompactRecords {
+        pub vec: CompactArray<RecordBatch>,
+    }
+
+    impl CompactRecords {
+        pub fn from_cluster_meta(mut buf: &[u8]) -> Result<Self, ParseError> {
+            let mut v = Vec::new();
+
+            while !buf.is_empty() {
+                let (rec, s) = RecordBatch::parse(buf)?;
+
+                buf.advance(s);
+                v.push(rec);
+            }
+
+            Ok(Self {
+                vec: CompactArray { vec: v },
+            })
+        }
+    }
+
+    impl Serialize for CompactRecords {
+        type Error = SerializeError;
+
+        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            // we can use the compact array serialization for this
+            self.vec.write(buf)
+        }
+    }
+
+    impl Deserialize for CompactRecords {
+        type Error = ParseError;
+
+        fn parse(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+            // we can use the compact array deserialization for this
+            let (vec, s) = CompactArray::parse(buf)?;
+
+            Ok((Self { vec }, s))
+        }
+    }
 
     /// Represents a sequence of Kafka records as COMPACT_NULLABLE_BYTES. For a detailed
     /// description of records see Message Sets.
@@ -455,7 +438,7 @@ pub mod disk {
         pub producer_epoch: i16,
         pub base_sequence: i32,
         pub records_count: i32,
-        pub records: CompactArray<Record>,
+        pub records: Vec<Record>,
     }
 
     impl Deserialize for RecordBatch {
@@ -466,9 +449,12 @@ pub mod disk {
 
             let base_offset = buf.get_i64();
             let batch_length = buf.get_i32();
+
+            let mut buf = &buf[..batch_length as usize];
             let partition_leader_epoch = buf.get_i32();
             let magic = buf.get_i8();
             let crc = buf.get_u32();
+
             let (attributes, s) = RecordsAttribute::parse(buf)?;
             buf.advance(s);
 
@@ -479,9 +465,16 @@ pub mod disk {
             let producer_epoch = buf.get_i16();
             let base_sequence = buf.get_i32();
             let records_count = buf.get_i32();
-            let (records, s) = CompactArray::parse(buf)?;
 
-            buf.advance(s);
+            let mut records = Vec::with_capacity(records_count as _);
+            for _ in 0..records_count {
+                let (record, s) = Record::parse(buf)?;
+                records.push(record);
+
+                buf.advance(s);
+            }
+
+            let len = 8 + 4 + batch_length as usize;
 
             let s = Self {
                 base_offset,
@@ -499,7 +492,10 @@ pub mod disk {
                 records_count,
                 records,
             };
-            Ok((s, len - buf.remaining()))
+
+            // debug_assert_eq!(len, batch_length as _);
+
+            Ok((s, len))
         }
     }
 
@@ -589,16 +585,16 @@ pub mod disk {
     /// Headers => [Header]
     #[derive(Debug, Clone, Default)]
     pub struct Record {
-        pub length: UnsignedVarint,
+        pub length: Varint,
         pub attributes: i8,
-        pub timestamp_delta: UnsignedVarlong,
-        pub offset_delta: UnsignedVarint,
-        pub key_length: UnsignedVarint,
+        pub timestamp_delta: Varlong,
+        pub offset_delta: Varint,
+        pub key_length: Varint,
         pub key: Vec<u8>,
-        pub value_length: UnsignedVarint,
+        pub value_length: Varint,
         pub value: Vec<u8>,
-        pub headers_count: UnsignedVarint,
-        pub headers: CompactArray<RecordHeader>,
+        pub headers_count: Varint,
+        pub headers: Vec<RecordHeader>,
     }
 
     impl Serialize for Record {
@@ -612,8 +608,62 @@ pub mod disk {
     impl Deserialize for Record {
         type Error = ParseError;
 
-        fn parse(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
-            todo!()
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+            let len = buf.len();
+            let (length, s) = Varint::parse(buf)?;
+            buf.advance(s);
+
+            let tmp = len - buf.remaining();
+
+            let mut buf = &buf[..length.val as usize];
+
+            let attributes = buf.get_i8();
+
+            let (timestamp_delta, s) = Varlong::parse(buf)?;
+            buf.advance(s);
+
+            let (offset_delta, s) = Varint::parse(buf)?;
+            buf.advance(s);
+
+            let (key_length, s) = Varint::parse(buf)?;
+            buf.advance(s);
+
+            let key = buf[..(key_length.val as usize)].to_vec();
+            buf.advance(key_length.val as usize);
+
+            let (value_length, s) = Varint::parse(buf)?;
+            buf.advance(s);
+
+            let value = buf[..(value_length.val as usize)].to_vec();
+            buf.advance(value_length.val as usize);
+
+            let (headers_count, s) = Varint::parse(buf)?;
+            buf.advance(s);
+
+            let mut headers = Vec::with_capacity(headers_count.val as usize);
+            for _ in 0..headers_count.val {
+                let (header, s) = RecordHeader::parse(buf)?;
+                buf.advance(s);
+
+                headers.push(header);
+            }
+
+            let s = Self {
+                length,
+                attributes,
+                timestamp_delta,
+                offset_delta,
+                key_length,
+                key,
+                value_length,
+                value,
+                headers_count,
+                headers,
+            };
+
+            let len = tmp + length.val as usize;
+
+            Ok((s, len))
         }
     }
 
@@ -623,9 +673,9 @@ pub mod disk {
     /// Value: byte[]
     #[derive(Debug, Clone, Default)]
     pub struct RecordHeader {
-        pub header_key_length: UnsignedVarint,
+        pub header_key_length: Varint,
         pub header_key: String,
-        pub header_value_length: UnsignedVarint,
+        pub header_value_length: Varint,
         pub value: Vec<u8>,
     }
 
