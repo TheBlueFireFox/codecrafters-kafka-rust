@@ -81,6 +81,9 @@ pub mod primitives {
                         s += 1;
                     }
 
+                    // (n >> 1) ^ (-(n & 1))
+                    let res = (res >> 1) ^ (-(res & 1));
+
                     Ok((Self { val: res }, s + 1))
                 }
             }
@@ -97,6 +100,79 @@ pub mod primitives {
                     // 0b_1000_0001 0b1000_0000 0b1000_0000 0b0000_0001
                     let mut count = 0;
                     let mut val = self.val;
+                    // (n << 1) ^ (n >> 31)
+                    val = (val << 1) ^ (val >> (std::mem::size_of::<$i>() * 8 - 1));
+
+                    loop {
+                        let mut b = val & (MASK as $i);
+
+                        val >>= 7;
+
+                        if val > 0 {
+                            b |= 0x80;
+                        }
+
+                        buf[count] = b as u8;
+
+                        count += 1;
+
+                        if val == 0 {
+                            break Ok(count);
+                        }
+                    }
+                }
+            }
+        };
+    }
+
+    macro_rules! VariableUInt {
+        ( ($t:ident, $i:ident) ) => {
+            #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+            pub struct $t {
+                pub val: $i,
+            }
+
+            impl Deserialize for $t {
+                type Error = ParseError;
+
+                fn parse(v: &[u8]) -> Result<(Self, usize), Self::Error> {
+                    let mut s = 0;
+                    let mut res = 0;
+
+                    const MASK_MSB: u8 = 0x01 << 7;
+                    const MASK: u8 = !MASK_MSB;
+
+                    loop {
+                        if s > std::mem::size_of::<$i>() {
+                            return Err(ParseError::InvalidVarint);
+                        }
+
+                        let m = (v[s] & MASK) as $i;
+                        res |= m << (7 * s);
+
+                        if v[s] & MASK_MSB == 0 {
+                            break;
+                        }
+                        s += 1;
+                    }
+
+                    Ok((Self { val: res }, s + 1))
+                }
+            }
+
+            impl Serialize for $t {
+                type Error = SerializeError;
+
+                fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+                    const MASK_MSB: u8 = 0x80;
+                    const MASK: u8 = !MASK_MSB;
+
+                    // ex: 0x01 0x00 0x00 0x01
+                    // => 0b1000_0001
+                    // 0b_1000_0001 0b1000_0000 0b1000_0000 0b0000_0001
+                    let mut count = 0;
+                    let mut val = self.val;
+
                     loop {
                         let mut b = val & (MASK as $i);
 
@@ -121,18 +197,28 @@ pub mod primitives {
 
     VariableInt!((Varint, i32));
     VariableInt!((Varlong, i64));
+    VariableUInt!((Varuint, u32));
+    VariableUInt!((Varulong, u64));
 
     #[test]
-    fn test_deserialize_unsigned_varint() {
-        let org = [0b10010110, 0b00000001];
-        let exp = Ok((Varint { val: 150 }, 2));
+    fn test_deserialize_signed_varint() {
+        let org = [0x3A];
+        let exp = Ok((Varint { val: 29 }, 1));
         let got = Varint::parse(&org);
         assert_eq!(exp, got);
     }
 
     #[test]
+    fn test_deserialize_unsigned_varint() {
+        let org = [0b10010110, 0b00000001];
+        let exp = Ok((Varuint { val: 150 }, 2));
+        let got = Varuint::parse(&org);
+        assert_eq!(exp, got);
+    }
+
+    #[test]
     fn test_serialize_unsigned_varint_a() {
-        let org = Varint { val: 150 };
+        let org = Varuint { val: 150 };
 
         let mut buf = [0; 4];
         let exp = [0b10010110, 0b00000001];
@@ -143,7 +229,7 @@ pub mod primitives {
 
     #[test]
     fn test_serialize_unsigned_varint_b() {
-        let org = Varint { val: 0x01_00_00_01 };
+        let org = Varuint { val: 0x01_00_00_01 };
 
         let mut buf = [0; 4];
         let exp = [0b1000_0001, 0b1000_0000, 0b1000_0000, 0b0000_1000];
@@ -227,11 +313,6 @@ pub mod primitives {
             };
 
             Ok((s, used))
-            // let (size, used) = UnsignedVarint::parse(buf)?;
-            // let size = size.val as usize;
-            // let s = std::str::from_utf8(&buf[used..][..size])?.to_string();
-            // // -1 for the size as the unsigned varint is N + 1
-            // Ok((Self { str: s }, used + size - 1))
         }
     }
 
@@ -278,7 +359,7 @@ pub mod primitives {
         fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
             // CompactArray format is N + 1
             let size = self.vec.len() + 1;
-            let size = Varint { val: size as i32 };
+            let size = Varuint { val: size as _ };
             let mut s = size.write(buf)?;
 
             for key in &self.vec {
@@ -293,7 +374,7 @@ pub mod primitives {
         type Error = ParseError;
 
         fn parse(buf: &[u8]) -> Result<(Self, usize), Self::Error> {
-            let (count, mut used) = Varint::parse(buf)?;
+            let (count, mut used) = Varuint::parse(buf)?;
 
             let count = count.val as usize;
 
@@ -450,9 +531,12 @@ pub mod disk {
             let base_offset = buf.get_i64();
             let batch_length = buf.get_i32();
 
-            let mut buf = &buf[..batch_length as usize];
+            // everything from here to batch_length
+
             let partition_leader_epoch = buf.get_i32();
             let magic = buf.get_i8();
+            debug_assert_eq!(magic, 2);
+
             let crc = buf.get_u32();
 
             let (attributes, s) = RecordsAttribute::parse(buf)?;
@@ -474,7 +558,11 @@ pub mod disk {
                 buf.advance(s);
             }
 
-            let len = 8 + 4 + batch_length as usize;
+            // this should be batch_length + 8 + 4
+
+            let len = len - buf.remaining();
+
+            debug_assert_eq!(len, batch_length as usize + 8 + 4);
 
             let s = Self {
                 base_offset,
@@ -492,8 +580,6 @@ pub mod disk {
                 records_count,
                 records,
             };
-
-            // debug_assert_eq!(len, batch_length as _);
 
             Ok((s, len))
         }
@@ -613,10 +699,6 @@ pub mod disk {
             let (length, s) = Varint::parse(buf)?;
             buf.advance(s);
 
-            let tmp = len - buf.remaining();
-
-            let mut buf = &buf[..length.val as usize];
-
             let attributes = buf.get_i8();
 
             let (timestamp_delta, s) = Varlong::parse(buf)?;
@@ -628,14 +710,20 @@ pub mod disk {
             let (key_length, s) = Varint::parse(buf)?;
             buf.advance(s);
 
-            let key = buf[..(key_length.val as usize)].to_vec();
-            buf.advance(key_length.val as usize);
+            let mut key = vec![];
+            if key_length.val > 0 {
+                key.extend_from_slice(&buf[..(key_length.val as usize)]);
+                buf.advance(key_length.val as usize);
+            }
 
             let (value_length, s) = Varint::parse(buf)?;
             buf.advance(s);
 
-            let value = buf[..(value_length.val as usize)].to_vec();
-            buf.advance(value_length.val as usize);
+            let mut value = vec![];
+            if value_length.val > 0 {
+                value.extend_from_slice(&buf[..(value_length.val as usize)]);
+                buf.advance(value_length.val as usize);
+            }
 
             let (headers_count, s) = Varint::parse(buf)?;
             buf.advance(s);
@@ -661,7 +749,7 @@ pub mod disk {
                 headers,
             };
 
-            let len = tmp + length.val as usize;
+            let len = len - buf.remaining();
 
             Ok((s, len))
         }
