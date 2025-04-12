@@ -1,7 +1,10 @@
 mod connection;
 mod messages;
-mod process;
 mod meta;
+mod process;
+
+#[cfg(test)]
+mod test_files;
 
 use tokio::select;
 

@@ -1,4 +1,7 @@
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use crate::messages::{
     disk::{CompactRecords, RecordValueType},
@@ -9,6 +12,7 @@ pub const PATH: &str = "/tmp/kraft-combined-logs/__cluster_metadata-0/0000000000
 
 #[derive(Debug, Clone)]
 pub struct Meta {
+    pub path: PathBuf,
     pub rec: CompactRecords,
 }
 
@@ -16,7 +20,7 @@ impl Meta {
     pub fn topic_map(&self) -> HashMap<Uuid, String> {
         let mut map = HashMap::new();
         for batch in &self.rec.vec.vec {
-            for record in &batch.records {
+            for record in &batch.records.vec {
                 let record = match &&record.value {
                     Some(r) => r,
                     _ => continue,
@@ -31,9 +35,12 @@ impl Meta {
     }
 
     pub fn from_cluster_metadata(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let buf = std::fs::read(path)?;
+        let buf = std::fs::read(&path)?;
         let res = CompactRecords::from_cluster_meta(&buf)?;
 
-        Ok(Self { rec: res })
+        Ok(Self {
+            rec: res,
+            path: path.as_ref().into(),
+        })
     }
 }

@@ -486,7 +486,7 @@ pub mod disk {
         pub producer_epoch: i16,
         pub base_sequence: i32,
         pub records_count: i32,
-        pub records: Vec<Record>,
+        pub records: CompactArray<Record>,
     }
 
     impl Deserialize for RecordBatch {
@@ -519,6 +519,8 @@ pub mod disk {
                 let record = Record::parse(buf)?;
                 records.push(record);
             }
+
+            let records = CompactArray { vec: records };
 
             // this should be batch_length + 8 + 4
 
@@ -565,9 +567,8 @@ pub mod disk {
             buf.put_i32(self.base_sequence);
             buf.put_i32(self.records_count);
 
-            // TODO: fix me pls
-            // self.records.write(buf)?;
-            todo!()
+            self.records.write(buf)?;
+            Ok(())
         }
     }
 
@@ -662,12 +663,26 @@ pub mod disk {
         pub value_length: Varint,
         pub value: Option<RecordValue>,
         pub headers_count: Varint,
-        pub headers: Vec<RecordHeader>,
+        pub headers: CompactArray<RecordHeader>,
     }
 
     impl Serialize for Record {
         fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
-            todo!()
+            self.length.write(buf)?;
+            buf.put_i8(self.attributes);
+            self.timestamp_delta.write(buf)?;
+            self.offset_delta.write(buf)?;
+            self.key_length.write(buf)?;
+
+            buf.put_slice(&self.key);
+
+            self.value_length.write(buf)?;
+            if let Some(v) = &self.value {
+                v.write(buf)?
+            }
+            self.headers_count.write(buf)?;
+            self.headers.write(buf)?;
+            Ok(())
         }
     }
 
@@ -717,6 +732,8 @@ pub mod disk {
                 headers.push(header);
             }
 
+            let headers = CompactArray { vec: headers };
+
             let s = Self {
                 length,
                 attributes,
@@ -745,15 +762,17 @@ pub mod disk {
         pub record_type: RecordValueType,
     }
 
-    #[derive(Debug, Clone)]
-    pub enum RecordValueType {
-        TopicRecord(TopicRecord),
-        Other,
-    }
-
     impl Serialize for RecordValue {
         fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
-            todo!()
+            buf.put_u8(self.frame_version);
+            buf.put_u8(self.version);
+
+            match &self.record_type {
+                RecordValueType::TopicRecord(topic_record) => topic_record.write(buf)?,
+                RecordValueType::Other(items) => buf.put_slice(&items[..]),
+            }
+
+            Ok(())
         }
     }
 
@@ -765,7 +784,7 @@ pub mod disk {
 
             let r = match r_type {
                 0x2 => TopicRecord::parse(buf).map(RecordValueType::TopicRecord)?,
-                _ => RecordValueType::Other,
+                _ => RecordValueType::Other(buf.chunk().to_vec()),
             };
 
             Ok(Self {
@@ -777,10 +796,22 @@ pub mod disk {
     }
 
     #[derive(Debug, Clone)]
+    pub enum RecordValueType {
+        TopicRecord(TopicRecord),
+        Other(Vec<u8>),
+    }
+
+    #[derive(Debug, Clone)]
     pub struct TopicRecord {
         pub name: CompactString,
         pub uuid: Uuid,
         pub _tagged_fields: TaggedFields,
+    }
+
+    impl Serialize for TopicRecord {
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
+            todo!()
+        }
     }
 
     impl Deserialize for TopicRecord {
@@ -1130,14 +1161,14 @@ pub mod responses {
         pub fn write(&self, buf: &mut Vec<u8>) -> Result<usize, SerializeError> {
             let s = self.write_helper(buf)?;
 
+            // insert the full size
             (&mut buf[..]).put_i32(s as i32);
 
-            Ok(s + 4)
+            Ok(s)
         }
 
         fn write_helper(&self, buf: &mut dyn BufMut) -> Result<usize, SerializeError> {
-
-            // add space for the size to be inserted later on 
+            // add space for the size to be inserted later on
             buf.put_i32(0);
 
             let len = buf.remaining_mut();
