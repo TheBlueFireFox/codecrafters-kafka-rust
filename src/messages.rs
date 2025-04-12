@@ -42,7 +42,7 @@ pub mod primitives {
     }
 
     pub trait Serialize {
-        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError>;
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError>;
     }
 
     #[derive(Debug, Clone, thiserror::Error, PartialEq)]
@@ -87,14 +87,13 @@ pub mod primitives {
             }
 
             impl Serialize for $t {
-                fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
+                fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
                     const MASK_MSB: u8 = 0x80;
                     const MASK: u8 = !MASK_MSB;
 
                     // ex: 0x01 0x00 0x00 0x01
                     // => 0b1000_0001
                     // 0b_1000_0001 0b1000_0000 0b1000_0000 0b0000_0001
-                    let mut count = 0;
                     let mut val = self.val;
                     // (n << 1) ^ (n >> 31)
                     val = (val << 1) ^ (val >> (std::mem::size_of::<$i>() * 8 - 1));
@@ -108,12 +107,10 @@ pub mod primitives {
                             b |= 0x80;
                         }
 
-                        buf[count] = b as u8;
-
-                        count += 1;
+                        buf.put_u8(b as u8);
 
                         if val == 0 {
-                            break Ok(count);
+                            break Ok(());
                         }
                     }
                 }
@@ -156,14 +153,13 @@ pub mod primitives {
             }
 
             impl Serialize for $t {
-                fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
+                fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
                     const MASK_MSB: u8 = 0x80;
                     const MASK: u8 = !MASK_MSB;
 
                     // ex: 0x01 0x00 0x00 0x01
                     // => 0b1000_0001
                     // 0b_1000_0001 0b1000_0000 0b1000_0000 0b0000_0001
-                    let mut count = 0;
                     let mut val = self.val;
 
                     loop {
@@ -175,12 +171,10 @@ pub mod primitives {
                             b |= 0x80;
                         }
 
-                        buf[count] = b as u8;
-
-                        count += 1;
+                        buf.put_u8(b as u8);
 
                         if val == 0 {
-                            break Ok(count);
+                            break Ok(());
                         }
                     }
                 }
@@ -215,23 +209,21 @@ pub mod primitives {
     fn test_serialize_unsigned_varint_a() {
         let org = Varuint { val: 150 };
 
-        let mut buf = [0; 4];
+        let mut buf = Vec::with_capacity(4);
         let exp = [0b10010110, 0b00000001];
-        let got = org.write(&mut buf);
-        assert_eq!(Ok(2), got);
-        assert_eq!(exp, buf[..2]);
+        org.write(&mut buf).expect("write successful");
+        assert_eq!(exp, &buf[..]);
     }
 
     #[test]
     fn test_serialize_unsigned_varint_b() {
         let org = Varuint { val: 0x01_00_00_01 };
 
-        let mut buf = [0; 4];
+        let mut buf = Vec::with_capacity(4);
         let exp = [0b1000_0001, 0b1000_0000, 0b1000_0000, 0b0000_1000];
 
-        let got = org.write(&mut buf);
-        assert_eq!(Ok(4), got);
-        assert_eq!(exp, buf);
+        org.write(&mut buf).expect("write successful");
+        assert_eq!(exp, &buf[..]);
     }
 
     #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash)]
@@ -254,12 +246,12 @@ pub mod primitives {
     }
 
     impl Serialize for Uuid {
-        fn write(&self, mut buf: &mut [u8]) -> Result<usize, SerializeError> {
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
             const LEN: usize = std::mem::size_of::<u128>();
 
             buf.put_u128(self.uuid);
 
-            Ok(LEN)
+            Ok(())
         }
     }
 
@@ -339,17 +331,17 @@ pub mod primitives {
     }
 
     impl<T: Serialize> Serialize for CompactArray<T> {
-        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
             // CompactArray format is N + 1
             let size = self.vec.len() + 1;
             let size = Varuint { val: size as _ };
-            let mut s = size.write(buf)?;
+            size.write(buf)?;
 
             for key in &self.vec {
-                s += key.write(&mut buf[s..])?;
+                key.write(buf)?;
             }
 
-            Ok(s)
+            Ok(())
         }
     }
 
@@ -398,9 +390,9 @@ pub mod primitives {
     }
 
     impl Serialize for TaggedFields {
-        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
-            buf[0] = 0;
-            Ok(1)
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
+            buf.put_u8(0);
+            Ok(())
         }
     }
 }
@@ -437,7 +429,7 @@ pub mod disk {
     }
 
     impl Serialize for CompactRecords {
-        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
             // we can use the compact array serialization for this
             self.vec.write(buf)
         }
@@ -556,14 +548,14 @@ pub mod disk {
     }
 
     impl Serialize for RecordBatch {
-        fn write(&self, mut buf: &mut [u8]) -> Result<usize, SerializeError> {
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
             buf.put_i64(self.base_offset);
             buf.put_i32(self.batch_length);
             buf.put_i32(self.partition_leader_epoch);
             buf.put_i8(self.magic);
             buf.put_u32(self.crc);
 
-            // buf.put_RecordsAttribute(self.attributes);
+            self.attributes.write(buf)?;
 
             buf.put_i32(self.last_offset_delta);
             buf.put_i64(self.base_timestamp);
@@ -573,7 +565,8 @@ pub mod disk {
             buf.put_i32(self.base_sequence);
             buf.put_i32(self.records_count);
 
-            // buf.put_Vec<Record>(self.records);
+            // TODO: fix me pls
+            // self.records.write(buf)?;
             todo!()
         }
     }
@@ -596,7 +589,7 @@ pub mod disk {
     }
 
     impl Serialize for RecordsAttribute {
-        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
             todo!()
         }
     }
@@ -673,7 +666,7 @@ pub mod disk {
     }
 
     impl Serialize for Record {
-        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
             todo!()
         }
     }
@@ -704,14 +697,13 @@ pub mod disk {
 
             let mut value = None;
             if value_length.val > 0 {
-                // TODO: clean this up... this happend because RecordValue is not fully
-                // implemented
-                let bbuf = buf.chunk();
+                let mut bbuf = buf.take(value_length.val as usize);
 
-                let mut bbuf = std::io::Cursor::new(bbuf);
                 let v = RecordValue::parse(&mut bbuf)?;
 
-                buf.advance(value_length.val as usize);
+                // this is required as not all of RecordValue variants are implemented
+                let rem = bbuf.remaining();
+                bbuf.advance(rem);
 
                 value = Some(v);
             }
@@ -760,7 +752,7 @@ pub mod disk {
     }
 
     impl Serialize for RecordValue {
-        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
             todo!()
         }
     }
@@ -828,7 +820,7 @@ pub mod disk {
     }
 
     impl Serialize for RecordHeader {
-        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
             todo!()
         }
     }
@@ -1134,14 +1126,26 @@ pub mod responses {
         pub response: ResponseType,
     }
 
-    impl Serialize for Response {
-        fn write(&self, mut buf: &mut [u8]) -> Result<usize, SerializeError> {
-            let mut s = 0;
-            s += self.header.write(&mut buf[4..])?;
-            s += self.response.write(&mut buf[4 + s..])?;
-            buf.put_i32(s as i32);
+    impl Response {
+        pub fn write(&self, buf: &mut Vec<u8>) -> Result<usize, SerializeError> {
+            let s = self.write_helper(buf)?;
 
-            Ok(4 + s)
+            (&mut buf[..]).put_i32(s as i32);
+
+            Ok(s + 4)
+        }
+
+        fn write_helper(&self, buf: &mut dyn BufMut) -> Result<usize, SerializeError> {
+
+            // add space for the size to be inserted later on 
+            buf.put_i32(0);
+
+            let len = buf.remaining_mut();
+            self.header.write(buf)?;
+
+            self.response.write(buf)?;
+
+            Ok(len - buf.remaining_mut())
         }
     }
 
@@ -1161,27 +1165,20 @@ pub mod responses {
     }
 
     impl Serialize for Header {
-        fn write(&self, mut buf: &mut [u8]) -> Result<usize, SerializeError> {
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
             match self {
                 Header::V0 { correlation_id } => {
-                    let len = buf.len();
                     buf.put_i32(*correlation_id);
-                    let s = len - buf.remaining_mut();
-
-                    Ok(s)
                 }
                 Header::V1 {
                     correlation_id,
                     _tagged_fields,
                 } => {
-                    let len = buf.len();
                     buf.put_i32(*correlation_id);
-                    let mut s = len - buf.remaining_mut();
-                    s += _tagged_fields.write(buf)?;
-
-                    Ok(s)
+                    _tagged_fields.write(buf)?;
                 }
             }
+            Ok(())
         }
     }
 
@@ -1192,7 +1189,7 @@ pub mod responses {
     }
 
     impl Serialize for ResponseType {
-        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
             match self {
                 ResponseType::Fetch(fetch) => fetch.write(buf),
                 ResponseType::ApiVersions(api) => api.write(buf),
@@ -1219,18 +1216,16 @@ pub mod responses {
         }
 
         impl Serialize for ApiVersions {
-            fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
-                (&mut buf[..]).put_i16(self.error_code as i16);
-                let mut s = 2;
+            fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
+                buf.put_i16(self.error_code as i16);
 
-                s += self.api_keys.write(&mut buf[s..])?;
+                self.api_keys.write(buf)?;
 
-                (&mut buf[s..]).put_i32(self.throttle_time_ms);
-                s += 4;
+                buf.put_i32(self.throttle_time_ms);
 
-                s += self._tagged_fields.write(&mut buf[s..])?;
+                self._tagged_fields.write(buf)?;
 
-                Ok(s)
+                Ok(())
             }
         }
 
@@ -1247,16 +1242,14 @@ pub mod responses {
         }
 
         impl Serialize for ApiKey {
-            fn write(&self, mut buf: &mut [u8]) -> Result<usize, SerializeError> {
-                let len = buf.len();
+            fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
                 buf.put_i16(self.api_key as i16);
                 buf.put_i16(self.min_version);
                 buf.put_i16(self.max_version);
 
                 // _tagged_fields
-                let mut len = len - buf.remaining_mut();
-                len += self._tagged_fields.write(buf)?;
-                Ok(len)
+                self._tagged_fields.write(buf)?;
+                Ok(())
             }
         }
     }
@@ -1294,19 +1287,15 @@ pub mod responses {
         }
 
         impl Serialize for Fetch {
-            fn write(&self, mut buf: &mut [u8]) -> Result<usize, SerializeError> {
-                let len = buf.len();
-
+            fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
                 buf.put_i32(self.throttle_time_ms);
                 buf.put_i16(self.error_code as i16);
                 buf.put_i32(self.session_id);
 
-                let diff = len - buf.remaining_mut();
+                self.responses.write(buf)?;
+                self._tagged_fields.write(buf)?;
 
-                let s = self.responses.write(buf)?;
-                let ss = self._tagged_fields.write(&mut buf[s..])?;
-
-                Ok(diff + s + ss)
+                Ok(())
             }
         }
 
@@ -1331,11 +1320,11 @@ pub mod responses {
         }
 
         impl Serialize for Response {
-            fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
-                let mut s = self.topic_id.write(buf)?;
-                s += self.partitions.write(&mut buf[s..])?;
-                s += self._tagged_fields.write(&mut buf[s..])?;
-                Ok(s)
+            fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
+                self.topic_id.write(buf)?;
+                self.partitions.write(buf)?;
+                self._tagged_fields.write(buf)?;
+                Ok(())
             }
         }
 
@@ -1364,25 +1353,20 @@ pub mod responses {
         }
 
         impl Serialize for Partition {
-            fn write(&self, mut buf: &mut [u8]) -> Result<usize, SerializeError> {
-                let len = buf.len();
+            fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
                 buf.put_i32(self.partition_index);
                 buf.put_i16(self.error_code as i16);
                 buf.put_i64(self.high_watermark);
                 buf.put_i64(self.last_stable_offset);
                 buf.put_i64(self.log_start_offset);
 
-                let mut s = len - buf.remaining_mut();
+                self.aborted_transactions.write(buf)?;
 
-                s += self.aborted_transactions.write(buf)?;
+                buf.put_i32(self.preferred_read_replica);
+                self.records.write(buf)?;
+                self._tagged_fields.write(buf)?;
 
-                (&mut buf[s..]).put_i32(self.preferred_read_replica);
-                s += std::mem::size_of::<i32>();
-
-                s += self.records.write(&mut buf[s..])?;
-                s += self._tagged_fields.write(&mut buf[s..])?;
-
-                Ok(s)
+                Ok(())
             }
         }
 
@@ -1397,15 +1381,13 @@ pub mod responses {
         }
 
         impl Serialize for AbortedTransactions {
-            fn write(&self, mut buf: &mut [u8]) -> Result<usize, SerializeError> {
-                let len = buf.len();
+            fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
                 buf.put_i64(self.producer_id);
                 buf.put_i64(self.first_offset);
 
-                let len = len - buf.remaining_mut();
-                let s = self._tagged_fields.write(buf)?;
+                self._tagged_fields.write(buf)?;
 
-                Ok(len + s)
+                Ok(())
             }
         }
     }

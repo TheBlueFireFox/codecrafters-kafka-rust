@@ -1,6 +1,6 @@
 use crate::{
     messages::{
-        primitives::{CompactArray, Serialize, TaggedFields},
+        primitives::{CompactArray, TaggedFields},
         requests,
         responses::{self, api_version::ApiKey},
         ApiKeys, ErrorCode,
@@ -23,7 +23,7 @@ static SUPPORTED_COMMANDS: [ApiKey; 2] = [
     },
 ];
 
-pub fn process(msg: &[u8], msg_out: &mut [u8], meta: &Meta) -> anyhow::Result<usize> {
+pub fn process(msg: &[u8], msg_out: &mut Vec<u8>, meta: &Meta) -> anyhow::Result<usize> {
     let req = requests::Request::try_from(msg)?;
 
     let res = handle_request(req, meta)?;
@@ -202,9 +202,9 @@ mod test {
             0x00, // _tagged_fields
         ];
 
-        let mut buf = [0; 100];
-        let len = process(&arr, &mut buf, &meta).expect("unable to extract");
-        assert_eq!(exp, &buf[..len]);
+        let mut buf = Vec::with_capacity(150);
+        process(&arr, &mut buf, &meta).expect("unable to extract");
+        assert_eq!(exp, &buf[..]);
     }
 
     fn fetch_file() -> (Meta, TempDir) {
@@ -329,8 +329,8 @@ mod test {
             0x2E, // valueLenght 23 =>
             0x01, // frameVersion
             0x0C, // record type
-            0x00, 0x11, 0x6D, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x2E, 0x76,
-            0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x00, 0x14, 0x00, // value
+            0x00, 0x11, 0x6D, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x2E, 0x76, 0x65, 0x72,
+            0x73, 0x69, 0x6F, 0x6E, 0x00, 0x14, 0x00, // value
             0x00, // header count
         ];
         let mut arr = std::io::Cursor::new(arr);
@@ -403,10 +403,10 @@ mod test {
             0x01, // responses count
             0x00, // _tagged_fields
         ];
-        let mut buf = [0; 50];
-        let len = process(&arr, &mut buf, &meta).expect("unable to extract");
+        let mut buf = Vec::with_capacity(150);
+        process(&arr, &mut buf, &meta).expect("unable to extract");
 
-        assert_eq!(exp, &buf[..len]);
+        assert_eq!(exp, &buf[..]);
     }
 
     #[test]
@@ -461,16 +461,16 @@ mod test {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // log_start_offset
             0x01, // aborted_transactions count
             0x00, 0x00, 0x00, 0x00, // preferred_read_replica
-            0x00, // records
+            0x01, // records
             0x00, // _tagged_fields
             0x00, // _tagged_fields
             0x00, // _tagged_fields
         ];
 
-        let mut buf = [0; 150];
-        let len = process(&arr, &mut buf, &meta).expect("unable to extract");
+        let mut buf = Vec::with_capacity(150);
+        process(&arr, &mut buf, &meta).expect("unable to extract");
 
-        assert_eq!(exp, &buf[..len]);
+        assert_eq!(exp, &buf[..]);
     }
 
     #[test]
@@ -508,7 +508,7 @@ mod test {
             0x00, // _tagged_fields
         ];
 
-        let mut buf = [0; 150];
+        let mut buf = Vec::with_capacity(150);
         let _len = process(&arr, &mut buf, &meta).expect("unable to extract");
     }
 }

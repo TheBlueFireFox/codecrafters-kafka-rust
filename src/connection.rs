@@ -12,12 +12,13 @@ enum Error {
 
 pub async fn handle_client(mut stream: tokio::net::TcpStream) -> anyhow::Result<()> {
     let mut msg = vec![0; 1024];
-    let mut msg_out = vec![0; 1024];
+    let mut msg_out = Vec::with_capacity(1024);
     let meta = Meta::from_cluster_metadata(meta::PATH)?;
 
     loop {
         match read_stream(&stream, &mut msg).await {
             Ok(_) => {
+                msg_out.clear();
                 let s = super::process::process(&msg, &mut msg_out, &meta)?;
                 stream.write_all(&msg_out[..s]).await?;
             }
