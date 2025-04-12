@@ -1,13 +1,15 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 
 use crate::messages::{
     disk::{CompactRecords, RecordValueType},
     primitives::Uuid,
 };
 
+pub const PATH: &str = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log";
+
 #[derive(Debug, Clone)]
 pub struct Meta {
-    rec: CompactRecords,
+    pub rec: CompactRecords,
 }
 
 impl Meta {
@@ -28,8 +30,7 @@ impl Meta {
         map
     }
 
-    pub fn from_cluster_metadata() -> anyhow::Result<Self> {
-        let path = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log";
+    pub fn from_cluster_metadata(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let buf = std::fs::read(path)?;
         let res = CompactRecords::from_cluster_meta(&buf)?;
 

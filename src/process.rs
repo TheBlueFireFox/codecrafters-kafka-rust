@@ -155,13 +155,20 @@ fn handle_api_version(
 
 #[cfg(test)]
 mod test {
-    use std::path::PathBuf;
+    use pretty_assertions::assert_eq;
+
+    use tempfile::{tempdir, TempDir};
+
+    use crate::{
+        messages::{disk::RecordBatch, primitives::Deserialize},
+        meta,
+    };
 
     use super::*;
 
     #[test]
     fn test_full_parse_api_version() {
-        let meta = fetch_file();
+        let (meta, _tmp_dir) = fetch_file();
 
         let arr = [
             0x00, 0x00, 0x00, 0x23, // len = 0x23 => 35
@@ -200,9 +207,13 @@ mod test {
         assert_eq!(exp, &buf[..len]);
     }
 
-    fn fetch_file() -> Meta {
-        let path = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log";
-        let path = PathBuf::from(path);
+    fn fetch_file() -> (Meta, TempDir) {
+        let tmp_dir = tempdir().expect("able to create a tmp dir");
+
+        let path = tmp_dir
+            .path()
+            .join("__cluster_metadata-0")
+            .join("00000000000000000000.log");
 
         let parent = path.parent().expect("has parent");
 
@@ -233,7 +244,8 @@ mod test {
             0x01, // keyLenght -> -1
             0x2E, // valueLenght 23 =>
             0x01, 0x0C, 0x00, 0x11, 0x6D, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x2E, 0x76,
-            0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x00, 0x14, 0x00, 0x00, // header count
+            0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x00, 0x14, 0x00, // value
+            0x00, // header count
             // -- RecordBatch 2
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x9A, 0x00, 0x00,
             0x00, 0x01, 0x02, 0xEE, 0xA1, 0x07, 0xF7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
@@ -279,17 +291,87 @@ mod test {
         ];
         std::fs::write(path, cluster).expect("able to write to cluster");
 
-        Meta::from_cluster_metadata().expect("able to read meta cluster")
+        (
+            Meta::from_cluster_metadata(meta::PATH).expect("able to read meta cluster"),
+            tmp_dir,
+        )
     }
 
     #[test]
     fn test_fetch_file() {
-        fetch_file();
+        let (meta, _) = fetch_file();
+        assert_eq!(meta.rec.vec.vec[0].base_offset, 0x01);
+    }
+
+    #[test]
+    fn test_parse_record_batch() {
+        let arr = [
+            // -- RecordBatch
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // baseOffset
+            0x00, 0x00, 0x00, 0x4F, // batchLength
+            0x00, 0x00, 0x00, 0x01, // partitionLeaderEpoch
+            0x02, // magic
+            0xB0, 0x69, 0x45, 0x7C, // CRC
+            0x00, 0x00, // attributes
+            0x00, 0x00, 0x00, 0x00, // lastOffsetDelta
+            0x00, 0x00, 0x01, 0x91, 0xE0, 0x5A, 0xF8, 0x18, // baseTimestamp
+            0x00, 0x00, 0x01, 0x91, 0xE0, 0x5A, 0xF8, 0x18, // maxTimestamp
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // producerId
+            0xFF, 0xFF, // producerEpoch
+            0xFF, 0xFF, 0xFF, 0xFF, // baseSequence
+            0x00, 0x00, 0x00, 0x01, // recordsCount
+            // -- Record
+            0x3A, // length -> 29
+            0x00, // attribute
+            0x00, // timestampDelta
+            0x00, // offsetDelta
+            0x01, // keyLenght -> -1
+            0x2E, // valueLenght 23 =>
+            0x01, // frameVersion
+            0x0C, // record type
+            0x00, 0x11, 0x6D, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x2E, 0x76,
+            0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x00, 0x14, 0x00, // value
+            0x00, // header count
+        ];
+        let mut arr = std::io::Cursor::new(arr);
+
+        let rb = RecordBatch::parse(&mut arr).expect("able to parse record batch");
+        assert_eq!(rb.base_offset, 0x01);
+    }
+
+    #[test]
+    fn test_only_parse_fetch_no_topics() {
+        let arr = [
+            0x00, 0x00, 0x00, 0x30, // len
+            0x00, 0x01, // request_api_key = 0x01
+            0x00, 0x10, // request_api_version = 16
+            0x1a, 0xf6, 0xe0, 0x6e, // correlation_id
+            0x00, 0x0c, // client_id
+            0x6b, 0x61, 0x66, 0x6b, 0x61, 0x2d, 0x74, 0x65, 0x73, 0x74, 0x65,
+            0x72, // kafka-tester
+            0x00, // _tagged_fields
+            0x00, 0x00, 0x01, 0xf4, // max_wait_ms
+            0x00, 0x00, 0x00, 0x01, // min_bytes
+            0x03, 0x20, 0x00, 0x00, // max_bytes
+            0x00, // isolation_level
+            0x02, 0x02, 0x02, 0x02, // session_id
+            0x00, 0x00, 0x00, 0x00, // session_epoch
+            0x01, // topic count
+            0x01, // forgotten_topics_data count
+            0x01, // rack_id count
+            0x00, // _tagged_fields
+        ];
+
+        let req = requests::Request::try_from(&arr[..]).expect("able to parse");
+        assert_eq!(
+            req.header.correlation_id,
+            i32::from_be_bytes([0x1a, 0xf6, 0xe0, 0x6e])
+        );
     }
 
     #[test]
     fn test_full_parse_fetch_no_topics() {
-        let meta = fetch_file();
+        let (meta, _tmp_dir) = fetch_file();
         let arr = [
             0x00, 0x00, 0x00, 0x30, // len
             0x00, 0x01, // request_api_key = 0x01
@@ -329,7 +411,7 @@ mod test {
 
     #[test]
     fn test_full_parse_fetch_unknown_topic() {
-        let meta = fetch_file();
+        let (meta, _tmp_dir) = fetch_file();
         let arr = [
             0x00, 0x00, 0x00, 0x60, // len
             0x00, 0x01, // request_api_key = 0x01 -> fetch
@@ -393,7 +475,7 @@ mod test {
 
     #[test]
     fn test_full_parse_fetch_empty_topic() {
-        let meta = fetch_file();
+        let (meta, _tmp_dir) = fetch_file();
         let arr = [
             0x00, 0x00, 0x00, 0x60, // len
             0x00, 0x01, // request_api_key -> fetch

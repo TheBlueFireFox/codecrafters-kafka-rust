@@ -1,6 +1,6 @@
 use tokio::io::AsyncWriteExt;
 
-use crate::meta::Meta;
+use crate::meta::{self, Meta};
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
@@ -13,7 +13,7 @@ enum Error {
 pub async fn handle_client(mut stream: tokio::net::TcpStream) -> anyhow::Result<()> {
     let mut msg = vec![0; 1024];
     let mut msg_out = vec![0; 1024];
-    let meta = Meta::from_cluster_metadata()?;
+    let meta = Meta::from_cluster_metadata(meta::PATH)?;
 
     loop {
         match read_stream(&stream, &mut msg).await {
