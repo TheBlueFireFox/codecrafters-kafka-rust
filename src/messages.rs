@@ -42,8 +42,7 @@ pub mod primitives {
     }
 
     pub trait Serialize {
-        type Error;
-        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error>;
+        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError>;
     }
 
     #[derive(Debug, Clone, thiserror::Error, PartialEq)]
@@ -86,9 +85,7 @@ pub mod primitives {
             }
 
             impl Serialize for $t {
-                type Error = SerializeError;
-
-                fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+                fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
                     const MASK_MSB: u8 = 0x80;
                     const MASK: u8 = !MASK_MSB;
 
@@ -156,9 +153,7 @@ pub mod primitives {
             }
 
             impl Serialize for $t {
-                type Error = SerializeError;
-
-                fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+                fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
                     const MASK_MSB: u8 = 0x80;
                     const MASK: u8 = !MASK_MSB;
 
@@ -254,9 +249,7 @@ pub mod primitives {
     }
 
     impl Serialize for Uuid {
-        type Error = SerializeError;
-
-        fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
+        fn write(&self, mut buf: &mut [u8]) -> Result<usize, SerializeError> {
             const LEN: usize = std::mem::size_of::<u128>();
 
             buf.put_u128(self.uuid);
@@ -338,10 +331,8 @@ pub mod primitives {
         }
     }
 
-    impl<T: Serialize<Error = SerializeError>> Serialize for CompactArray<T> {
-        type Error = SerializeError;
-
-        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+    impl<T: Serialize> Serialize for CompactArray<T> {
+        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
             // CompactArray format is N + 1
             let size = self.vec.len() + 1;
             let size = Varuint { val: size as _ };
@@ -400,9 +391,7 @@ pub mod primitives {
     }
 
     impl Serialize for TaggedFields {
-        type Error = SerializeError;
-
-        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
             buf[0] = 0;
             Ok(1)
         }
@@ -442,9 +431,7 @@ pub mod disk {
     }
 
     impl Serialize for CompactRecords {
-        type Error = SerializeError;
-
-        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
             // we can use the compact array serialization for this
             self.vec.write(buf)
         }
@@ -566,9 +553,7 @@ pub mod disk {
     }
 
     impl Serialize for RecordBatch {
-        type Error = SerializeError;
-
-        fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
+        fn write(&self, mut buf: &mut [u8]) -> Result<usize, SerializeError> {
             buf.put_i64(self.base_offset);
             buf.put_i32(self.batch_length);
             buf.put_i32(self.partition_leader_epoch);
@@ -608,9 +593,7 @@ pub mod disk {
     }
 
     impl Serialize for RecordsAttribute {
-        type Error = SerializeError;
-
-        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
             todo!()
         }
     }
@@ -687,9 +670,7 @@ pub mod disk {
     }
 
     impl Serialize for Record {
-        type Error = SerializeError;
-
-        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
             todo!()
         }
     }
@@ -780,9 +761,7 @@ pub mod disk {
     }
 
     impl Serialize for RecordValue {
-        type Error = SerializeError;
-
-        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
             todo!()
         }
     }
@@ -866,9 +845,7 @@ pub mod disk {
     }
 
     impl Serialize for RecordHeader {
-        type Error = SerializeError;
-
-        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
             todo!()
         }
     }
@@ -1207,9 +1184,7 @@ pub mod responses {
     }
 
     impl Serialize for Response {
-        type Error = SerializeError;
-
-        fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
+        fn write(&self, mut buf: &mut [u8]) -> Result<usize, SerializeError> {
             let mut s = 0;
             s += self.header.write(&mut buf[4..])?;
             s += self.response.write(&mut buf[4 + s..])?;
@@ -1235,9 +1210,7 @@ pub mod responses {
     }
 
     impl Serialize for Header {
-        type Error = SerializeError;
-
-        fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
+        fn write(&self, mut buf: &mut [u8]) -> Result<usize, SerializeError> {
             match self {
                 Header::V0 { correlation_id } => {
                     let len = buf.len();
@@ -1268,9 +1241,7 @@ pub mod responses {
     }
 
     impl Serialize for ResponseType {
-        type Error = SerializeError;
-
-        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
             match self {
                 ResponseType::Fetch(fetch) => fetch.write(buf),
                 ResponseType::ApiVersions(api) => api.write(buf),
@@ -1297,9 +1268,7 @@ pub mod responses {
         }
 
         impl Serialize for ApiVersions {
-            type Error = SerializeError;
-
-            fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
                 (&mut buf[..]).put_i16(self.error_code as i16);
                 let mut s = 2;
 
@@ -1327,9 +1296,7 @@ pub mod responses {
         }
 
         impl Serialize for ApiKey {
-            type Error = SerializeError;
-
-            fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
+            fn write(&self, mut buf: &mut [u8]) -> Result<usize, SerializeError> {
                 let len = buf.len();
                 buf.put_i16(self.api_key as i16);
                 buf.put_i16(self.min_version);
@@ -1376,9 +1343,7 @@ pub mod responses {
         }
 
         impl Serialize for Fetch {
-            type Error = SerializeError;
-
-            fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
+            fn write(&self, mut buf: &mut [u8]) -> Result<usize, SerializeError> {
                 let len = buf.len();
 
                 buf.put_i32(self.throttle_time_ms);
@@ -1415,9 +1380,7 @@ pub mod responses {
         }
 
         impl Serialize for Response {
-            type Error = SerializeError;
-
-            fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            fn write(&self, buf: &mut [u8]) -> Result<usize, SerializeError> {
                 let mut s = self.topic_id.write(buf)?;
                 s += self.partitions.write(&mut buf[s..])?;
                 s += self._tagged_fields.write(&mut buf[s..])?;
@@ -1450,9 +1413,7 @@ pub mod responses {
         }
 
         impl Serialize for Partition {
-            type Error = SerializeError;
-
-            fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
+            fn write(&self, mut buf: &mut [u8]) -> Result<usize, SerializeError> {
                 let len = buf.len();
                 buf.put_i32(self.partition_index);
                 buf.put_i16(self.error_code as i16);
@@ -1485,9 +1446,7 @@ pub mod responses {
         }
 
         impl Serialize for AbortedTransactions {
-            type Error = SerializeError;
-
-            fn write(&self, mut buf: &mut [u8]) -> Result<usize, Self::Error> {
+            fn write(&self, mut buf: &mut [u8]) -> Result<usize, SerializeError> {
                 let len = buf.len();
                 buf.put_i64(self.producer_id);
                 buf.put_i64(self.first_offset);
