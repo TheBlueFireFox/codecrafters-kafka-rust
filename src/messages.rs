@@ -22,7 +22,7 @@ pub mod primitives {
     use bytes::{Buf, BufMut};
 
     #[derive(Debug, thiserror::Error, PartialEq)]
-    pub enum ParseError {
+    pub enum DeserializeError {
         #[error("Invalid buffer size <{0}> expected <{1}>")]
         InvalidSize(usize, usize),
         #[error("Varint is larger then expected")]
@@ -38,7 +38,7 @@ pub mod primitives {
     }
 
     pub trait Deserialize: Sized {
-        fn parse(buf: &[u8]) -> Result<(Self, usize), ParseError>;
+        fn parse(buf: &[u8]) -> Result<(Self, usize), DeserializeError>;
     }
 
     pub trait Serialize {
@@ -56,7 +56,7 @@ pub mod primitives {
             }
 
             impl Deserialize for $t {
-                fn parse(v: &[u8]) -> Result<(Self, usize), ParseError> {
+                fn parse(v: &[u8]) -> Result<(Self, usize), DeserializeError> {
                     let mut s = 0;
                     let mut res = 0;
 
@@ -65,7 +65,7 @@ pub mod primitives {
 
                     loop {
                         if s > std::mem::size_of::<$i>() {
-                            return Err(ParseError::InvalidVarint);
+                            return Err(DeserializeError::InvalidVarint);
                         }
 
                         let m = (v[s] & MASK) as $i;
@@ -127,7 +127,7 @@ pub mod primitives {
             }
 
             impl Deserialize for $t {
-                fn parse(v: &[u8]) -> Result<(Self, usize), ParseError> {
+                fn parse(v: &[u8]) -> Result<(Self, usize), DeserializeError> {
                     let mut s = 0;
                     let mut res = 0;
 
@@ -136,7 +136,7 @@ pub mod primitives {
 
                     loop {
                         if s > std::mem::size_of::<$i>() {
-                            return Err(ParseError::InvalidVarint);
+                            return Err(DeserializeError::InvalidVarint);
                         }
 
                         let m = (v[s] & MASK) as $i;
@@ -235,11 +235,11 @@ pub mod primitives {
     }
 
     impl Deserialize for Uuid {
-        fn parse(mut buf: &[u8]) -> Result<(Self, usize), ParseError> {
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
             const LEN: usize = std::mem::size_of::<u128>();
 
             if buf.len() <= LEN {
-                return Err(ParseError::InvalidSize(buf.len(), LEN));
+                return Err(DeserializeError::InvalidSize(buf.len(), LEN));
             }
 
             let uuid = buf.get_u128();
@@ -267,7 +267,7 @@ pub mod primitives {
     }
 
     impl Deserialize for NullableString {
-        fn parse(mut buf: &[u8]) -> Result<(Self, usize), ParseError> {
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
             let len = buf.get_i16();
             let len = len.max(0) as usize;
             let mut str = None;
@@ -288,7 +288,7 @@ pub mod primitives {
     }
 
     impl Deserialize for CompactString {
-        fn parse(buf: &[u8]) -> Result<(Self, usize), ParseError> {
+        fn parse(buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
             let (arr, used) = CompactArray::parse(buf)?;
             let s = Self {
                 str: String::from_utf8(arr.vec)?,
@@ -316,7 +316,7 @@ pub mod primitives {
     }
 
     impl Deserialize for u8 {
-        fn parse(mut buf: &[u8]) -> Result<(Self, usize), ParseError> {
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
             let len = buf.len();
             let val = buf.get_u8();
             Ok((val, len - buf.remaining()))
@@ -324,7 +324,7 @@ pub mod primitives {
     }
 
     impl Deserialize for i32 {
-        fn parse(mut buf: &[u8]) -> Result<(Self, usize), ParseError> {
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
             let len = buf.len();
             let val = buf.get_i32();
             Ok((val, len - buf.remaining()))
@@ -347,7 +347,7 @@ pub mod primitives {
     }
 
     impl<T: Deserialize> Deserialize for CompactArray<T> {
-        fn parse(buf: &[u8]) -> Result<(Self, usize), ParseError> {
+        fn parse(buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
             let (count, mut used) = Varuint::parse(buf)?;
 
             let count = count.val as usize;
@@ -381,7 +381,7 @@ pub mod primitives {
     pub struct TaggedFields;
 
     impl Deserialize for TaggedFields {
-        fn parse(v: &[u8]) -> Result<(Self, usize), ParseError> {
+        fn parse(v: &[u8]) -> Result<(Self, usize), DeserializeError> {
             if v[0] == 0 {
                 return Ok((TaggedFields, 1));
             }
@@ -404,7 +404,7 @@ pub mod disk {
     use crate::messages::primitives::Uuid;
 
     use super::primitives::{
-        CompactArray, CompactString, Deserialize, ParseError, Serialize, SerializeError,
+        CompactArray, CompactString, Deserialize, DeserializeError, Serialize, SerializeError,
         TaggedFields, Varint, Varlong,
     };
 
@@ -414,7 +414,7 @@ pub mod disk {
     }
 
     impl CompactRecords {
-        pub fn from_cluster_meta(mut buf: &[u8]) -> Result<Self, ParseError> {
+        pub fn from_cluster_meta(mut buf: &[u8]) -> Result<Self, DeserializeError> {
             let mut v = Vec::new();
 
             while !buf.is_empty() {
@@ -438,7 +438,7 @@ pub mod disk {
     }
 
     impl Deserialize for CompactRecords {
-        fn parse(buf: &[u8]) -> Result<(Self, usize), ParseError> {
+        fn parse(buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
             // we can use the compact array deserialization for this
             let (vec, s) = CompactArray::parse(buf)?;
 
@@ -492,7 +492,7 @@ pub mod disk {
     }
 
     impl Deserialize for RecordBatch {
-        fn parse(mut buf: &[u8]) -> Result<(Self, usize), ParseError> {
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
             let len = buf.len();
 
             let base_offset = buf.get_i64();
@@ -628,7 +628,7 @@ pub mod disk {
     }
 
     impl Deserialize for RecordsAttribute {
-        fn parse(mut buf: &[u8]) -> Result<(Self, usize), ParseError> {
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
             let val = buf.get_i16();
             Ok((Self { val }, 2))
         }
@@ -676,7 +676,7 @@ pub mod disk {
     }
 
     impl Deserialize for Record {
-        fn parse(mut buf: &[u8]) -> Result<(Self, usize), ParseError> {
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
             let len = buf.len();
             let (length, s) = Varint::parse(buf)?;
             buf.advance(s);
@@ -767,7 +767,7 @@ pub mod disk {
     }
 
     impl Deserialize for RecordValue {
-        fn parse(mut buf: &[u8]) -> Result<(Self, usize), ParseError> {
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
             let len = buf.len();
 
             let frame_version = buf.get_u8();
@@ -802,7 +802,7 @@ pub mod disk {
     }
 
     impl Deserialize for TopicRecord {
-        fn parse(mut buf: &[u8]) -> Result<(Self, usize), ParseError> {
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
             let len = buf.len();
 
             let (name, s) = CompactString::parse(buf)?;
@@ -839,7 +839,7 @@ pub mod disk {
     }
 
     impl Deserialize for RecordHeader {
-        fn parse(buf: &[u8]) -> Result<(Self, usize), ParseError> {
+        fn parse(buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
             todo!()
         }
     }
@@ -852,7 +852,7 @@ pub mod disk {
 }
 
 pub mod requests {
-    use super::primitives::{CompactString, Deserialize, NullableString, ParseError, TaggedFields};
+    use super::primitives::{CompactString, Deserialize, NullableString, DeserializeError, TaggedFields};
     use bytes::buf::Buf;
 
     /// Request Header v1 => request_api_key request_api_version correlation_id client_id
@@ -870,7 +870,7 @@ pub mod requests {
     }
 
     impl Deserialize for Header {
-        fn parse(mut buf: &[u8]) -> Result<(Self, usize), ParseError> {
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
             let len = buf.len();
 
             let request_api_key = buf.get_i16();
@@ -911,13 +911,13 @@ pub mod requests {
     }
 
     impl TryFrom<&[u8]> for Request {
-        type Error = ParseError;
+        type Error = DeserializeError;
 
         fn try_from(mut buf: &[u8]) -> Result<Self, Self::Error> {
             let size: usize = buf.get_i32().try_into()?;
 
             if size != buf.len() {
-                return Err(ParseError::InvalidSize(size, buf.len()));
+                return Err(DeserializeError::InvalidSize(size, buf.len()));
             }
 
             let (header, s) = Header::parse(buf)?;
@@ -932,7 +932,7 @@ pub mod requests {
     }
 
     impl RequestType {
-        fn parse(request_api_key: i16, buf: &[u8]) -> Result<(Self, usize), ParseError> {
+        fn parse(request_api_key: i16, buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
             let s = match request_api_key {
                 1 => {
                     let s = fetch::Fetch::parse(buf)?;
@@ -988,7 +988,7 @@ pub mod requests {
         }
 
         impl Deserialize for Fetch {
-            fn parse(mut buf: &[u8]) -> Result<(Self, usize), ParseError> {
+            fn parse(mut buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
                 let len = buf.len();
                 let max_wait_ms = buf.get_i32();
                 let min_bytes = buf.get_i32();
@@ -1045,7 +1045,7 @@ pub mod requests {
         }
 
         impl Deserialize for Topic {
-            fn parse(mut buf: &[u8]) -> Result<(Self, usize), ParseError> {
+            fn parse(mut buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
                 let len = buf.len();
 
                 let (topic_id, s) = Uuid::parse(buf)?;
@@ -1086,7 +1086,7 @@ pub mod requests {
         }
 
         impl Deserialize for Partition {
-            fn parse(mut buf: &[u8]) -> Result<(Self, usize), ParseError> {
+            fn parse(mut buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
                 let len = buf.len();
 
                 let partition = buf.get_i32();
@@ -1124,7 +1124,7 @@ pub mod requests {
         }
 
         impl Deserialize for ForgottenTopicsData {
-            fn parse(mut buf: &[u8]) -> Result<(Self, usize), ParseError> {
+            fn parse(mut buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
                 let len = buf.len();
 
                 let (uuid, s) = Uuid::parse(buf)?;
@@ -1157,7 +1157,7 @@ pub mod requests {
         }
 
         impl Deserialize for ApiVersions {
-            fn parse(buf: &[u8]) -> Result<(Self, usize), ParseError> {
+            fn parse(buf: &[u8]) -> Result<(Self, usize), DeserializeError> {
                 let (client_software_name, s) = CompactString::parse(buf)?;
                 let (client_software_version, a) = CompactString::parse(&buf[s..])?;
                 Ok((
