@@ -239,7 +239,7 @@ pub mod primitives {
         assert_eq!(exp, buf);
     }
 
-    #[derive(Debug, Copy, Clone, Default)]
+    #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash)]
     pub struct Uuid {
         pub uuid: u128,
     }
@@ -431,8 +431,11 @@ pub mod primitives {
 pub mod disk {
     use bytes::Buf;
 
+    use crate::messages::primitives::Uuid;
+
     use super::primitives::{
-        CompactArray, Deserialize, ParseError, Serialize, SerializeError, Varint, Varlong,
+        CompactArray, CompactString, Deserialize, ParseError, Serialize, SerializeError,
+        TaggedFields, Varint, Varlong,
     };
 
     #[derive(Debug, Clone, Default)]
@@ -678,7 +681,7 @@ pub mod disk {
         pub key_length: Varint,
         pub key: Vec<u8>,
         pub value_length: Varint,
-        pub value: Vec<u8>,
+        pub value: Option<RecordValue>,
         pub headers_count: Varint,
         pub headers: Vec<RecordHeader>,
     }
@@ -698,6 +701,8 @@ pub mod disk {
             let len = buf.len();
             let (length, s) = Varint::parse(buf)?;
             buf.advance(s);
+
+            let len_post_length = s;
 
             let attributes = buf.get_i8();
 
@@ -719,10 +724,15 @@ pub mod disk {
             let (value_length, s) = Varint::parse(buf)?;
             buf.advance(s);
 
-            let mut value = vec![];
+            let mut value = None;
             if value_length.val > 0 {
-                value.extend_from_slice(&buf[..(value_length.val as usize)]);
+                let sub_buf = &buf[..(value_length.val as usize)];
+                let (v, s) = RecordValue::parse(sub_buf)?;
+
+                debug_assert_eq!(s, value_length.val as usize);
+
                 buf.advance(value_length.val as usize);
+                value = Some(v);
             }
 
             let (headers_count, s) = Varint::parse(buf)?;
@@ -750,8 +760,96 @@ pub mod disk {
             };
 
             let len = len - buf.remaining();
+            debug_assert_eq!(len, len_post_length + length.val as usize);
 
             Ok((s, len))
+        }
+    }
+
+    // See https://cwiki.apache.org/confluence/display/KAFKA/KIP-746%3A%2BRevise%2BKRaft%2BMetadata%2BRecords
+    // And https://binspec.org/kafka-cluster-metadata?highlight=67-89
+    #[derive(Debug, Clone)]
+    pub struct RecordValue {
+        pub frame_version: u8,
+        pub version: u8,
+        pub record_type: RecordValueType,
+    }
+
+    #[derive(Debug, Clone)]
+    pub enum RecordValueType {
+        TopicRecord(TopicRecord),
+        Other,
+    }
+
+    impl Serialize for RecordValue {
+        type Error = SerializeError;
+
+        fn write(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            todo!()
+        }
+    }
+
+    impl Deserialize for RecordValue {
+        type Error = ParseError;
+
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+            let len = buf.len();
+
+            let frame_version = buf.get_u8();
+            let r_type = buf.get_u8();
+            let version = buf.get_u8();
+
+            let (r, s) = match r_type {
+                0x2 => TopicRecord::parse(buf).map(|a| (RecordValueType::TopicRecord(a.0), a.1))?,
+                _ => (RecordValueType::Other, buf.remaining()),
+            };
+
+            buf.advance(s);
+
+            let len = len - buf.remaining();
+
+            Ok((
+                Self {
+                    frame_version,
+                    version,
+                    record_type: r,
+                },
+                len,
+            ))
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct TopicRecord {
+        pub name: CompactString,
+        pub uuid: Uuid,
+        pub _tagged_fields: TaggedFields,
+    }
+
+    impl Deserialize for TopicRecord {
+        type Error = ParseError;
+
+        fn parse(mut buf: &[u8]) -> Result<(Self, usize), Self::Error> {
+            let len = buf.len();
+
+            let (name, s) = CompactString::parse(buf)?;
+            buf.advance(s);
+
+            let (uuid, s) = Uuid::parse(buf)?;
+            buf.advance(s);
+
+            let (_tagged_fields, s) = TaggedFields::parse(buf)?;
+            buf.advance(s);
+
+            let m = Self {
+                name,
+                uuid,
+                _tagged_fields,
+            };
+
+            let len = len - buf.remaining();
+
+            Ok((m, len))
         }
     }
 

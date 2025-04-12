@@ -1,8 +1,11 @@
-use crate::messages::{
-    primitives::{CompactArray, Serialize, TaggedFields},
-    requests,
-    responses::{self, api_version::ApiKey},
-    ApiKeys, ErrorCode,
+use crate::{
+    messages::{
+        primitives::{CompactArray, Serialize, TaggedFields},
+        requests,
+        responses::{self, api_version::ApiKey},
+        ApiKeys, ErrorCode,
+    },
+    meta::Meta,
 };
 
 static SUPPORTED_COMMANDS: [ApiKey; 2] = [
@@ -20,16 +23,16 @@ static SUPPORTED_COMMANDS: [ApiKey; 2] = [
     },
 ];
 
-pub fn process(msg: &[u8], msg_out: &mut [u8]) -> anyhow::Result<usize> {
+pub fn process(msg: &[u8], msg_out: &mut [u8], meta: &Meta) -> anyhow::Result<usize> {
     let req = requests::Request::try_from(msg)?;
 
-    let res = handle_request(req)?;
+    let res = handle_request(req, meta)?;
 
     let s = res.write(msg_out)?;
     Ok(s)
 }
 
-fn handle_request(req: requests::Request) -> anyhow::Result<responses::Response> {
+fn handle_request(req: requests::Request, meta: &Meta) -> anyhow::Result<responses::Response> {
     use responses::ResponseType;
     let header = responses::Header::V1 {
         correlation_id: req.header.correlation_id,
@@ -48,7 +51,7 @@ fn handle_request(req: requests::Request) -> anyhow::Result<responses::Response>
             return Ok(responses::Response { header, response });
         }
         requests::RequestType::Fetch(fetch) => {
-            fetch::handle_fetch(req.header, fetch).map(ResponseType::Fetch)?
+            fetch::handle_fetch(req.header, fetch, meta).map(ResponseType::Fetch)?
         }
     };
 
@@ -56,18 +59,22 @@ fn handle_request(req: requests::Request) -> anyhow::Result<responses::Response>
 }
 
 mod fetch {
-    use crate::messages::{
-        disk::CompactRecords,
-        primitives::CompactArray,
-        requests,
-        responses::{self, fetch::Response},
-        ErrorCode,
+
+    use crate::{
+        messages::{
+            primitives::CompactArray,
+            requests,
+            responses::{self, fetch::Response},
+            ErrorCode,
+        },
+        meta::Meta,
     };
     use responses::fetch::*;
 
     pub fn handle_fetch(
         header: requests::Header,
         fetch_request: requests::fetch::Fetch,
+        meta: &Meta,
     ) -> anyhow::Result<responses::fetch::Fetch> {
         if header.request_api_version != 16 {
             return Ok(Fetch {
@@ -77,7 +84,7 @@ mod fetch {
             });
         }
 
-        let responses = handle_responses(&fetch_request)?;
+        let responses = handle_responses(&fetch_request, meta)?;
 
         let responses = CompactArray { vec: responses };
 
@@ -88,36 +95,39 @@ mod fetch {
         })
     }
 
-    fn handle_responses(fetch_request: &requests::fetch::Fetch) -> anyhow::Result<Vec<Response>> {
-        let cluster_metadata = load_cluster_metadata()?;
+    fn handle_responses(
+        fetch_request: &requests::fetch::Fetch,
+        meta: &Meta,
+    ) -> anyhow::Result<Vec<Response>> {
+        let topics = meta.topic_map();
 
         let mut res = Vec::with_capacity(fetch_request.topics.vec.len());
 
-        for topics in &fetch_request.topics.vec {
-            let partitions = vec![Partition {
-                partition_index: 0,
-                error_code: ErrorCode::UnknownTopic,
-                ..Default::default()
-            }];
+        for topic in &fetch_request.topics.vec {
+            let error_code = match topics.contains_key(&topic.topic_id) {
+                true => ErrorCode::NoError,
+                false => ErrorCode::UnknownTopic,
+            };
+
+            let mut partitions = vec![];
+            for p in &topic.partitions.vec {
+                let part = Partition {
+                    partition_index: p.partition,
+                    error_code,
+                    ..Default::default()
+                };
+                partitions.push(part);
+            }
 
             let partitions = CompactArray { vec: partitions };
             let response = Response {
-                topic_id: topics.topic_id,
+                topic_id: topic.topic_id,
                 partitions,
                 ..Default::default()
             };
 
             res.push(response);
         }
-        Ok(res)
-    }
-
-    pub(super) fn load_cluster_metadata() -> anyhow::Result<CompactRecords> {
-        let path = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log";
-        let buf = std::fs::read(path)?;
-        let res = CompactRecords::from_cluster_meta(&buf)?;
-        dbg!(&res);
-
         Ok(res)
     }
 }
@@ -147,10 +157,12 @@ fn handle_api_version(
 mod test {
     use std::path::PathBuf;
 
-    use super::{fetch::load_cluster_metadata, *};
+    use super::*;
 
     #[test]
     fn test_full_parse_api_version() {
+        let meta = fetch_file();
+
         let arr = [
             0x00, 0x00, 0x00, 0x23, // len = 0x23 => 35
             0x00, 0x12, // request_api_key = 0x12 => 18
@@ -184,11 +196,11 @@ mod test {
         ];
 
         let mut buf = [0; 100];
-        let len = process(&arr, &mut buf).expect("unable to extract");
+        let len = process(&arr, &mut buf, &meta).expect("unable to extract");
         assert_eq!(exp, &buf[..len]);
     }
 
-    fn fetch_file() {
+    fn fetch_file() -> Meta {
         let path = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log";
         let path = PathBuf::from(path);
 
@@ -266,17 +278,18 @@ mod test {
             0x40, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
         ];
         std::fs::write(path, cluster).expect("able to write to cluster");
+
+        Meta::from_cluster_metadata().expect("able to read meta cluster")
     }
 
     #[test]
     fn test_fetch_file() {
         fetch_file();
-        let _rec = load_cluster_metadata().expect("successfully loaded the metadata");
     }
 
     #[test]
     fn test_full_parse_fetch_no_topics() {
-        fetch_file();
+        let meta = fetch_file();
         let arr = [
             0x00, 0x00, 0x00, 0x30, // len
             0x00, 0x01, // request_api_key = 0x01
@@ -309,14 +322,14 @@ mod test {
             0x00, // _tagged_fields
         ];
         let mut buf = [0; 50];
-        let len = process(&arr, &mut buf).expect("unable to extract");
+        let len = process(&arr, &mut buf, &meta).expect("unable to extract");
 
         assert_eq!(exp, &buf[..len]);
     }
 
     #[test]
     fn test_full_parse_fetch_unknown_topic() {
-        fetch_file();
+        let meta = fetch_file();
         let arr = [
             0x00, 0x00, 0x00, 0x60, // len
             0x00, 0x01, // request_api_key = 0x01 -> fetch
@@ -373,13 +386,14 @@ mod test {
         ];
 
         let mut buf = [0; 150];
-        let len = process(&arr, &mut buf).expect("unable to extract");
+        let len = process(&arr, &mut buf, &meta).expect("unable to extract");
 
         assert_eq!(exp, &buf[..len]);
     }
 
     #[test]
     fn test_full_parse_fetch_empty_topic() {
+        let meta = fetch_file();
         let arr = [
             0x00, 0x00, 0x00, 0x60, // len
             0x00, 0x01, // request_api_key -> fetch
@@ -413,32 +427,6 @@ mod test {
         ];
 
         let mut buf = [0; 150];
-        let len = process(&arr, &mut buf).expect("unable to extract");
-
-        // 2, // unsigned_varint - number of tagged fields 
-        // 0, // unsigned_varint - field 1 tag 
-        // 4, // unsigned_varint - field 1 len
-        // 113, // q
-        // 117, // u
-        // 120, // x
-        // 0, // unsigned_varint - field 2 tag
-        // 0, // unsigned_varint - field 2 len
-        // 0,
-        // 0,
-        // 0,
-        // 0,
-        // 64,
-        // 0,
-        // 128,
-        // 0,
-        // 0,
-        // 0,
-        // 0,
-        // 0,
-        // 0,
-        // 103,
-        // 0,
-
-        panic!("foo");
+        let _len = process(&arr, &mut buf, &meta).expect("unable to extract");
     }
 }
