@@ -8,7 +8,7 @@ use crate::{
     meta::Meta,
 };
 
-static SUPPORTED_COMMANDS: [ApiKey; 2] = [
+static SUPPORTED_COMMANDS: &[ApiKey] = &[
     ApiKey {
         api_key: ApiKeys::Fetch,
         min_version: 16,
@@ -19,6 +19,12 @@ static SUPPORTED_COMMANDS: [ApiKey; 2] = [
         min_version: 4,
         max_version: 4,
         api_key: ApiKeys::ApiVersions,
+        _tagged_fields: TaggedFields {},
+    },
+    ApiKey {
+        min_version: 0,
+        max_version: 0,
+        api_key: ApiKeys::DescribeTopicPartitions,
         _tagged_fields: TaggedFields {},
     },
 ];

@@ -6,6 +6,7 @@ pub enum ApiKeys {
     Fetch = 1,
     #[default]
     ApiVersions = 18,
+    DescribeTopicPartitions = 75,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
