@@ -442,14 +442,15 @@ pub mod disk {
 
     impl Serialize for CompactRecords {
         fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
-            let s = Varuint {
-                val: (self.vec.len() + 1) as _,
-            };
-            s.write(buf)?;
-
+            let mut v = Vec::with_capacity(1000);
             for e in &self.vec {
-                e.write(buf)?;
+                e.write(&mut v)?;
             }
+
+            let s = Varuint { val: v.len() as _ };
+            s.write(buf)?;
+            buf.put_slice(&v);
+
             Ok(())
         }
     }

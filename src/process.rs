@@ -164,7 +164,7 @@ mod fetch {
         let mut records = CompactRecords::default();
 
         if !content.is_empty() {
-            records = CompactRecords::from_buf(&content)?
+            records = CompactRecords::from_buf(&content)?;
         }
 
         let part = Partition {
@@ -425,7 +425,7 @@ mod test {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // log_start_offset
             0x01, // aborted_transactions count
             0x00, 0x00, 0x00, 0x00, // preferred_read_replica
-            0x01, // records
+            0x00, // records
             0x00, // _tagged_fields
             0x00, // _tagged_fields
             0x00, // _tagged_fields
