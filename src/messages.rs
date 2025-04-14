@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, strum::FromRepr)]
 #[repr(i16)]
 pub enum ApiKeys {
     Fetch = 1,
@@ -284,7 +284,7 @@ pub mod primitives {
     /// Represents a sequence of characters. First the length N + 1 is given as an
     /// UNSIGNED_VARINT . Then N bytes follow which are the UTF-8 encoding of the character
     /// sequence.
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Default)]
     pub struct CompactString {
         pub str: String,
     }
@@ -901,8 +901,9 @@ pub mod disk {
 }
 
 pub mod requests {
-    use super::primitives::{
-        CompactString, Deserialize, DeserializeError, NullableString, TaggedFields,
+    use super::{
+        primitives::{CompactString, Deserialize, DeserializeError, NullableString, TaggedFields},
+        ApiKeys,
     };
     use bytes::buf::Buf;
 
@@ -950,6 +951,7 @@ pub mod requests {
     pub enum RequestType {
         Fetch(fetch::Fetch),
         ApiVersions(api_versions::ApiVersions),
+        DescribeTopicPartitions(describe_topic_partitions::DescribeTopicPartitions),
     }
 
     impl TryFrom<&[u8]> for Request {
@@ -976,16 +978,20 @@ pub mod requests {
 
     impl RequestType {
         fn parse(request_api_key: i16, buf: &mut dyn Buf) -> Result<Self, DeserializeError> {
-            let s = match request_api_key {
-                1 => {
+            let s = match ApiKeys::from_repr(request_api_key) {
+                Some(ApiKeys::Fetch) => {
                     let s = fetch::Fetch::parse(buf)?;
                     RequestType::Fetch(s)
                 }
-                18 => {
+                Some(ApiKeys::ApiVersions) => {
                     let s = api_versions::ApiVersions::parse(buf)?;
                     RequestType::ApiVersions(s)
                 }
-                _ => unimplemented!("no such request key"),
+                Some(ApiKeys::DescribeTopicPartitions) => {
+                    let s = describe_topic_partitions::DescribeTopicPartitions::parse(buf)?;
+                    RequestType::DescribeTopicPartitions(s)
+                }
+                None => unimplemented!("no such request key"),
             };
             Ok(s)
         }
@@ -1187,6 +1193,91 @@ pub mod requests {
             }
         }
     }
+
+    pub mod describe_topic_partitions {
+        use crate::messages::primitives::{
+            CompactArray, CompactString, Deserialize, DeserializeError, TaggedFields,
+        };
+
+        /// DescribeTopicPartitions Request (Version: 0) => [topics] response_partition_limit cursor _tagged_fields
+        ///   topics => name _tagged_fields
+        ///     name => COMPACT_STRING
+        ///   response_partition_limit => INT32
+        ///   cursor => topic_name partition_index _tagged_fields
+        ///     topic_name => COMPACT_STRING
+        ///     partition_index => INT32
+        #[derive(Debug, Clone)]
+        pub struct DescribeTopicPartitions {
+            pub topics: CompactArray<Topics>,
+            pub response_partition_limit: i32,
+            pub cursor: Option<Cursor>,
+            pub _tagged_fields: TaggedFields,
+        }
+
+        impl Deserialize for DescribeTopicPartitions {
+            fn parse(buf: &mut dyn bytes::Buf) -> Result<Self, DeserializeError> {
+                let topics = CompactArray::parse(buf)?;
+                let response_partition_limit = buf.get_i32();
+                let cursor_exists = buf.get_u8();
+                let mut cursor = None;
+                if cursor_exists == 0x01 {
+                    cursor = Some(Cursor::parse(buf)?);
+                }
+                let _tagged_fields = TaggedFields::parse(buf)?;
+
+                Ok(Self {
+                    topics,
+                    response_partition_limit,
+                    cursor,
+                    _tagged_fields,
+                })
+            }
+        }
+
+        ///   topics => name _tagged_fields
+        ///     name => COMPACT_STRING
+        #[derive(Debug, Clone)]
+        pub struct Topics {
+            pub name: CompactString,
+            pub _tagged_fields: TaggedFields,
+        }
+
+        impl Deserialize for Topics {
+            fn parse(buf: &mut dyn bytes::Buf) -> Result<Self, DeserializeError> {
+                let name = CompactString::parse(buf)?;
+                let _tagged_fields = TaggedFields::parse(buf)?;
+
+                Ok(Self {
+                    name,
+                    _tagged_fields,
+                })
+            }
+        }
+
+        ///   cursor => topic_name partition_index _tagged_fields
+        ///     topic_name => COMPACT_STRING
+        ///     partition_index => INT32
+        #[derive(Debug, Clone)]
+        pub struct Cursor {
+            pub topic_name: CompactString,
+            pub partition_index: i32,
+            pub _tagged_fields: TaggedFields,
+        }
+
+        impl Deserialize for Cursor {
+            fn parse(buf: &mut dyn bytes::Buf) -> Result<Self, DeserializeError> {
+                let topic_name = CompactString::parse(buf)?;
+                let partition_index = buf.get_i32();
+                let _tagged_fields = TaggedFields::parse(buf)?;
+
+                Ok(Self {
+                    topic_name,
+                    partition_index,
+                    _tagged_fields,
+                })
+            }
+        }
+    }
 }
 
 pub mod responses {
@@ -1261,6 +1352,7 @@ pub mod responses {
     pub enum ResponseType {
         Fetch(fetch::Fetch),
         ApiVersions(api_version::ApiVersions),
+        DescribeTopicPartitions(describe_topic_partitions::DescribeTopicPartitions),
     }
 
     impl Serialize for ResponseType {
@@ -1268,6 +1360,96 @@ pub mod responses {
             match self {
                 ResponseType::Fetch(fetch) => fetch.write(buf),
                 ResponseType::ApiVersions(api) => api.write(buf),
+                ResponseType::DescribeTopicPartitions(describe_topic_partitions) => {
+                    describe_topic_partitions.write(buf)
+                }
+            }
+        }
+    }
+
+    pub mod describe_topic_partitions {
+        use crate::messages::primitives::{CompactString, Uuid};
+
+        use super::*;
+
+        #[derive(Debug, Clone, Default)]
+        pub struct DescribeTopicPartitions {
+            pub throttle_time: i32,
+            pub topics: CompactArray<Topic>,
+            pub next_cursor: Option<Cursor>,
+            pub _tagged_fields: TaggedFields,
+        }
+
+        impl Serialize for DescribeTopicPartitions {
+            fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
+                buf.put_i32(self.throttle_time);
+                self.topics.write(buf)?;
+                // https://forum.codecrafters.io/t/question-about-vt6-list-for-an-unknown-topic-0xff-cursor/6174/3?u=thebluefirefox
+                // So, if None => 0xFF otherwise 0x01
+                match &self.next_cursor {
+                    Some(c) => {
+                        buf.put_u8(0x01);
+                        c.write(buf)?;
+                    }
+                    None => {
+                        buf.put_u8(0xff);
+                    }
+                }
+                self._tagged_fields.write(buf)?;
+                Ok(())
+            }
+        }
+
+        ///   cursor => topic_name partition_index _tagged_fields
+        ///     topic_name => COMPACT_STRING
+        ///     partition_index => INT32
+        #[derive(Debug, Clone, Default)]
+        pub struct Cursor {
+            pub topic_name: CompactString,
+            pub partition_index: i32,
+            pub _tagged_fields: TaggedFields,
+        }
+
+        impl Serialize for Cursor {
+            fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
+                self.topic_name.write(buf)?;
+                buf.put_i32(self.partition_index);
+                self._tagged_fields.write(buf)?;
+
+                Ok(())
+            }
+        }
+        #[derive(Debug, Clone, Default)]
+        pub struct Topic {
+            pub error_code: ErrorCode,
+            pub topic_name: CompactString,
+            pub topic_id: Uuid,
+            pub is_internal: bool,
+            pub partitions: CompactArray<Partition>,
+            pub topic_auth_ops: u32,
+            pub _tagged_fields: TaggedFields,
+        }
+
+        impl Serialize for Topic {
+            fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
+                buf.put_i16(self.error_code as _);
+                self.topic_name.write(buf)?;
+                self.topic_id.write(buf)?;
+                buf.put_u8(self.is_internal as _);
+                self.partitions.write(buf)?;
+                buf.put_u32(self.topic_auth_ops);
+                self._tagged_fields.write(buf)?;
+
+                Ok(())
+            }
+        }
+
+        #[derive(Debug, Clone, Default)]
+        pub struct Partition {}
+
+        impl Serialize for Partition {
+            fn write(&self, _buf: &mut dyn BufMut) -> Result<(), SerializeError> {
+                todo!()
             }
         }
     }

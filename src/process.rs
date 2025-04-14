@@ -1,9 +1,9 @@
 use crate::{
     messages::{
-        primitives::{CompactArray, TaggedFields},
+        primitives::TaggedFields,
         requests,
         responses::{self, api_version::ApiKey},
-        ApiKeys, ErrorCode,
+        ApiKeys,
     },
     meta::Meta,
 };
@@ -56,16 +56,56 @@ fn handle_request(req: requests::Request, meta: &Meta) -> anyhow::Result<respons
             let header = responses::Header::V0 {
                 correlation_id: req.header.correlation_id,
             };
-            let response = handle_api_version(req.header, api).map(ResponseType::ApiVersions)?;
+            let response = api_version::handle(req.header, api).map(ResponseType::ApiVersions)?;
 
             return Ok(responses::Response { header, response });
         }
         requests::RequestType::Fetch(fetch) => {
-            fetch::handle_fetch(req.header, fetch, meta).map(ResponseType::Fetch)?
+            fetch::handle(req.header, fetch, meta).map(ResponseType::Fetch)?
+        }
+        requests::RequestType::DescribeTopicPartitions(describe_topic_partitions) => {
+            describe_topic_partitions::handle(req.header, describe_topic_partitions, meta)
+                .map(ResponseType::DescribeTopicPartitions)?
         }
     };
 
     Ok(responses::Response { header, response })
+}
+
+mod describe_topic_partitions {
+    use crate::{
+        messages::{primitives::CompactArray, requests, responses, ErrorCode},
+        meta::Meta,
+    };
+
+    pub fn handle(
+        header: requests::Header,
+        request: requests::describe_topic_partitions::DescribeTopicPartitions,
+        _meta: &Meta,
+    ) -> anyhow::Result<responses::describe_topic_partitions::DescribeTopicPartitions> {
+        use responses::describe_topic_partitions::*;
+
+        debug_assert_eq!(header.request_api_version, 0);
+
+        let mut topics = vec![];
+
+        for t in &request.topics.vec {
+            let nt = Topic {
+                error_code: ErrorCode::UnknownTopicOrParition,
+                topic_name: t.name.clone(),
+                ..Default::default()
+            };
+            topics.push(nt);
+        }
+
+        let topics = CompactArray { vec: topics };
+
+        let des = responses::describe_topic_partitions::DescribeTopicPartitions {
+            topics,
+            ..Default::default()
+        };
+        Ok(des)
+    }
 }
 
 mod fetch {
@@ -82,7 +122,7 @@ mod fetch {
     };
     use responses::fetch::*;
 
-    pub fn handle_fetch(
+    pub fn handle(
         header: requests::Header,
         fetch_request: requests::fetch::Fetch,
         meta: &Meta,
@@ -183,27 +223,33 @@ mod fetch {
     }
 }
 
-fn handle_api_version(
-    header: requests::Header,
-    _api: requests::api_versions::ApiVersions,
-) -> anyhow::Result<responses::api_version::ApiVersions> {
-    use responses::api_version::*;
-    let api = match header.request_api_version {
-        4 => ApiVersions {
-            api_keys: CompactArray {
-                vec: SUPPORTED_COMMANDS.to_vec(),
-            },
-            ..Default::default()
-        },
-        _ => ApiVersions {
-            error_code: ErrorCode::UnsupportedVersion,
-            ..Default::default()
-        },
+mod api_version {
+    use crate::{
+        messages::{primitives::CompactArray, requests, responses, ErrorCode},
+        process::SUPPORTED_COMMANDS,
     };
 
-    Ok(api)
-}
+    pub fn handle(
+        header: requests::Header,
+        _api: requests::api_versions::ApiVersions,
+    ) -> anyhow::Result<responses::api_version::ApiVersions> {
+        use responses::api_version::*;
+        let api = match header.request_api_version {
+            4 => ApiVersions {
+                api_keys: CompactArray {
+                    vec: SUPPORTED_COMMANDS.to_vec(),
+                },
+                ..Default::default()
+            },
+            _ => ApiVersions {
+                error_code: ErrorCode::UnsupportedVersion,
+                ..Default::default()
+            },
+        };
 
+        Ok(api)
+    }
+}
 #[cfg(test)]
 mod test {
     use pretty_assertions::assert_eq;
@@ -240,10 +286,10 @@ mod test {
         ];
 
         let exp = [
-            0x00, 0x00, 0x00, 0x1a, // len
+            0x00, 0x00, 0x00, 0x21, // len
             0x6d, 0xfe, 0xa9, 0x9a, // correlation_id = 0x6d 0xfe 0xa9 0x9a
             0x00, 0x00, // error code = no error
-            0x03, // len api_keys (compact array N + 1)
+            0x04, // len api_keys (compact array N + 1)
             0x00, 0x01, // api_key
             0x00, 0x10, // min_version
             0x00, 0x10, // max_version
@@ -251,6 +297,10 @@ mod test {
             0x00, 0x12, // api_key
             0x00, 0x04, // min_version
             0x00, 0x04, // max_version
+            0x00, // _tagged_fields
+            0x00, 0x4b, // api_key
+            0x00, 0x00, // min_version
+            0x00, 0x00, // max_version
             0x00, // _tagged_fields
             0x00, 0x00, 0x00, 0x00, // throttle_time_ms
             0x00, // _tagged_fields
@@ -557,5 +607,21 @@ mod test {
             }
             _ => unimplemented!("WHY ARE WE HERE"),
         }
+    }
+
+    #[test]
+    fn test_full_parse_describe_unknown() {
+        let (meta, _tmp_dir) = fetch_file();
+
+        let arr = [
+            0x00, 0x00, 0x00, 0x31, 0x00, 0x4b, 0x00, 0x00, 0x56, 0x80, 0x9a, 0x17, 0x00, 0x0c,
+            0x6b, 0x61, 0x66, 0x6b, 0x61, 0x2d, 0x74, 0x65, 0x73, 0x74, 0x65, 0x72, 0x00, 0x02,
+            0x12, 0x75, 0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x2d, 0x74, 0x6f, 0x70, 0x69, 0x63,
+            0x2d, 0x71, 0x75, 0x7a, 0x00, 0x00, 0x00, 0x00, 0x01, 0xff, 0x00,
+        ];
+
+        let mut buf = vec![];
+
+        let _len = process(&arr, &mut buf, &meta).expect("unable to extract");
     }
 }
