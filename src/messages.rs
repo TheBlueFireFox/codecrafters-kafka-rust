@@ -288,14 +288,42 @@ pub mod primitives {
         pub str: String,
     }
 
+    impl Serialize for CompactString {
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
+            // CompactString format is N + 1 + UTF8
+            let size = self.str.len() + 1;
+            let size = Varuint { val: size as _ };
+            size.write(buf)?;
+
+            buf.put_slice(self.str.as_bytes());
+
+            Ok(())
+        }
+    }
+
     impl Deserialize for CompactString {
         fn parse(buf: &mut dyn Buf) -> Result<Self, DeserializeError> {
+            // we can just use the CompactArray impl as it is the same one
             let arr = CompactArray::parse(buf)?;
             let s = Self {
                 str: String::from_utf8(arr.vec)?,
             };
 
             Ok(s)
+        }
+    }
+
+    impl Deserialize for u8 {
+        fn parse(buf: &mut dyn Buf) -> Result<Self, DeserializeError> {
+            let val = buf.get_u8();
+            Ok(val)
+        }
+    }
+
+    impl Deserialize for i32 {
+        fn parse(buf: &mut dyn Buf) -> Result<Self, DeserializeError> {
+            let val = buf.get_i32();
+            Ok(val)
         }
     }
 
@@ -313,20 +341,6 @@ pub mod primitives {
             Self {
                 vec: Default::default(),
             }
-        }
-    }
-
-    impl Deserialize for u8 {
-        fn parse(buf: &mut dyn Buf) -> Result<Self, DeserializeError> {
-            let val = buf.get_u8();
-            Ok(val)
-        }
-    }
-
-    impl Deserialize for i32 {
-        fn parse(buf: &mut dyn Buf) -> Result<Self, DeserializeError> {
-            let val = buf.get_i32();
-            Ok(val)
         }
     }
 
@@ -404,16 +418,16 @@ pub mod disk {
 
     use super::primitives::{
         CompactArray, CompactString, Deserialize, DeserializeError, Serialize, SerializeError,
-        TaggedFields, Varint, Varlong,
+        TaggedFields, Varint, Varlong, Varuint,
     };
 
     #[derive(Debug, Clone, Default)]
     pub struct CompactRecords {
-        pub vec: CompactArray<RecordBatch>,
+        pub vec: Vec<RecordBatch>,
     }
 
     impl CompactRecords {
-        pub fn from_cluster_meta(buf: &[u8]) -> Result<Self, DeserializeError> {
+        pub fn from_buf(buf: &[u8]) -> Result<Self, DeserializeError> {
             let mut buf = std::io::Cursor::new(buf);
             let mut v = Vec::new();
 
@@ -422,25 +436,21 @@ pub mod disk {
                 v.push(rec);
             }
 
-            Ok(Self {
-                vec: CompactArray { vec: v },
-            })
+            Ok(Self { vec: v })
         }
     }
 
     impl Serialize for CompactRecords {
         fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
-            // we can use the compact array serialization for this
-            self.vec.write(buf)
-        }
-    }
+            let s = Varuint {
+                val: (self.vec.len() + 1) as _,
+            };
+            s.write(buf)?;
 
-    impl Deserialize for CompactRecords {
-        fn parse(buf: &mut dyn Buf) -> Result<Self, DeserializeError> {
-            // we can use the compact array deserialization for this
-            let vec = CompactArray::parse(buf)?;
-
-            Ok(Self { vec })
+            for e in &self.vec {
+                e.write(buf)?;
+            }
+            Ok(())
         }
     }
 
@@ -491,11 +501,10 @@ pub mod disk {
 
     impl Deserialize for RecordBatch {
         fn parse(buf: &mut dyn Buf) -> Result<Self, DeserializeError> {
-            let len = buf.remaining();
-
             let base_offset = buf.get_i64();
             let batch_length = buf.get_i32();
 
+            let mut buf = buf.take(batch_length as _);
             // everything from here to batch_length
 
             let partition_leader_epoch = buf.get_i32();
@@ -504,7 +513,7 @@ pub mod disk {
 
             let crc = buf.get_u32();
 
-            let attributes = RecordsAttribute::parse(buf)?;
+            let attributes = RecordsAttribute::parse(&mut buf)?;
 
             let last_offset_delta = buf.get_i32();
             let base_timestamp = buf.get_i64();
@@ -516,7 +525,7 @@ pub mod disk {
 
             let mut records = Vec::with_capacity(records_count as _);
             for _ in 0..records_count {
-                let record = Record::parse(buf)?;
+                let record = Record::parse(&mut buf)?;
                 records.push(record);
             }
 
@@ -524,9 +533,7 @@ pub mod disk {
 
             // this should be batch_length + 8 + 4
 
-            let len = len - buf.remaining();
-
-            debug_assert_eq!(len, batch_length as usize + 8 + 4);
+            debug_assert_eq!(0, buf.remaining());
 
             let s = Self {
                 base_offset,
@@ -553,12 +560,14 @@ pub mod disk {
         fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
             buf.put_i64(self.base_offset);
             buf.put_i32(self.batch_length);
+
+            let mut buf = buf.limit(self.batch_length as _);
+
             buf.put_i32(self.partition_leader_epoch);
             buf.put_i8(self.magic);
             buf.put_u32(self.crc);
 
-            self.attributes.write(buf)?;
-
+            self.attributes.write(&mut buf)?;
             buf.put_i32(self.last_offset_delta);
             buf.put_i64(self.base_timestamp);
             buf.put_i64(self.max_timestamp);
@@ -566,8 +575,12 @@ pub mod disk {
             buf.put_i16(self.producer_epoch);
             buf.put_i32(self.base_sequence);
             buf.put_i32(self.records_count);
+            for r in &self.records.vec {
+                r.write(&mut buf)?;
+            }
 
-            self.records.write(buf)?;
+            debug_assert_eq!(0, buf.remaining_mut());
+
             Ok(())
         }
     }
@@ -589,9 +602,17 @@ pub mod disk {
         pub val: i16,
     }
 
+    impl Deserialize for RecordsAttribute {
+        fn parse(buf: &mut dyn Buf) -> Result<Self, DeserializeError> {
+            let val = buf.get_i16();
+            Ok(Self { val })
+        }
+    }
+
     impl Serialize for RecordsAttribute {
         fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
-            todo!()
+            buf.put_i16(self.val);
+            Ok(())
         }
     }
 
@@ -621,13 +642,6 @@ pub mod disk {
 
         pub fn has_delete_horizon_ms(&self) -> bool {
             (self.val & 0b10_0000) > 1
-        }
-    }
-
-    impl Deserialize for RecordsAttribute {
-        fn parse(buf: &mut dyn Buf) -> Result<Self, DeserializeError> {
-            let val = buf.get_i16();
-            Ok(Self { val })
         }
     }
 
@@ -663,17 +677,20 @@ pub mod disk {
         pub value_length: Varint,
         pub value: Option<RecordValue>,
         pub headers_count: Varint,
-        pub headers: CompactArray<RecordHeader>,
+        pub headers: Vec<RecordHeader>,
     }
 
     impl Serialize for Record {
         fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
             self.length.write(buf)?;
+
+            let buf = &mut buf.limit(self.length.val as _);
             buf.put_i8(self.attributes);
+
             self.timestamp_delta.write(buf)?;
             self.offset_delta.write(buf)?;
-            self.key_length.write(buf)?;
 
+            self.key_length.write(buf)?;
             buf.put_slice(&self.key);
 
             self.value_length.write(buf)?;
@@ -681,26 +698,27 @@ pub mod disk {
                 v.write(buf)?
             }
             self.headers_count.write(buf)?;
-            self.headers.write(buf)?;
+            for h in &self.headers {
+                h.write(buf)?;
+            }
+            debug_assert_eq!(0, buf.remaining_mut());
+
             Ok(())
         }
     }
 
     impl Deserialize for Record {
         fn parse(buf: &mut dyn Buf) -> Result<Self, DeserializeError> {
-            let len = buf.remaining();
-
             let length = Varint::parse(buf)?;
-
-            let len_length = len - buf.remaining();
+            let mut buf = buf.take(length.val as _);
 
             let attributes = buf.get_i8();
 
-            let timestamp_delta = Varlong::parse(buf)?;
+            let timestamp_delta = Varlong::parse(&mut buf)?;
 
-            let offset_delta = Varint::parse(buf)?;
+            let offset_delta = Varint::parse(&mut buf)?;
 
-            let key_length = Varint::parse(buf)?;
+            let key_length = Varint::parse(&mut buf)?;
 
             let mut key = vec![];
             if key_length.val > 0 {
@@ -708,11 +726,11 @@ pub mod disk {
                 buf.copy_to_slice(&mut key[..]);
             }
 
-            let value_length = Varint::parse(buf)?;
+            let value_length = Varint::parse(&mut buf)?;
 
             let mut value = None;
             if value_length.val > 0 {
-                let mut bbuf = buf.take(value_length.val as usize);
+                let mut bbuf = (&mut buf).take(value_length.val as usize);
 
                 let v = RecordValue::parse(&mut bbuf)?;
 
@@ -723,16 +741,14 @@ pub mod disk {
                 value = Some(v);
             }
 
-            let headers_count = Varint::parse(buf)?;
+            let headers_count = Varint::parse(&mut buf)?;
 
             let mut headers = Vec::with_capacity(headers_count.val as usize);
             for _ in 0..headers_count.val {
-                let header = RecordHeader::parse(buf)?;
+                let header = RecordHeader::parse(&mut buf)?;
 
                 headers.push(header);
             }
-
-            let headers = CompactArray { vec: headers };
 
             let s = Self {
                 length,
@@ -747,7 +763,7 @@ pub mod disk {
                 headers,
             };
 
-            debug_assert_eq!(buf.remaining(), len - (len_length + length.val as usize));
+            debug_assert_eq!(0, buf.remaining());
 
             Ok(s)
         }
@@ -758,6 +774,7 @@ pub mod disk {
     #[derive(Debug, Clone)]
     pub struct RecordValue {
         pub frame_version: u8,
+        pub r_type: u8,
         pub version: u8,
         pub record_type: RecordValueType,
     }
@@ -765,6 +782,7 @@ pub mod disk {
     impl Serialize for RecordValue {
         fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
             buf.put_u8(self.frame_version);
+            buf.put_u8(self.r_type);
             buf.put_u8(self.version);
 
             match &self.record_type {
@@ -790,6 +808,7 @@ pub mod disk {
             Ok(Self {
                 frame_version,
                 version,
+                r_type,
                 record_type: r,
             })
         }
@@ -810,7 +829,10 @@ pub mod disk {
 
     impl Serialize for TopicRecord {
         fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
-            todo!()
+            self.name.write(buf)?;
+            self.uuid.write(buf)?;
+            self._tagged_fields.write(buf)?;
+            Ok(())
         }
     }
 
@@ -846,13 +868,32 @@ pub mod disk {
 
     impl Deserialize for RecordHeader {
         fn parse(buf: &mut dyn Buf) -> Result<Self, DeserializeError> {
-            todo!()
+            let header_key_length = Varint::parse(buf)?;
+            let header_key =
+                std::str::from_utf8(&buf.chunk()[..header_key_length.val as _])?.to_string();
+            buf.advance(header_key_length.val as _);
+
+            let header_value_length = Varint::parse(buf)?;
+            let value = buf.chunk()[..header_value_length.val as _].to_vec();
+            let s = Self {
+                header_key_length,
+                header_key,
+                header_value_length,
+                value,
+            };
+
+            Ok(s)
         }
     }
 
     impl Serialize for RecordHeader {
         fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
-            todo!()
+            self.header_key_length.write(buf)?;
+            buf.put_slice(self.header_key.as_bytes());
+            self.header_value_length.write(buf)?;
+            buf.put_slice(&self.value);
+
+            Ok(())
         }
     }
 }
@@ -1161,17 +1202,18 @@ pub mod responses {
         pub fn write(&self, buf: &mut Vec<u8>) -> Result<usize, SerializeError> {
             let s = self.write_helper(buf)?;
 
-            // insert the full size
-            (&mut buf[..]).put_i32(s as i32);
+            // insert the full size minus the isze block
+            (&mut buf[..]).put_i32((s - 4) as i32);
 
             Ok(s)
         }
 
         fn write_helper(&self, buf: &mut dyn BufMut) -> Result<usize, SerializeError> {
             // add space for the size to be inserted later on
+            let len = buf.remaining_mut();
+
             buf.put_i32(0);
 
-            let len = buf.remaining_mut();
             self.header.write(buf)?;
 
             self.response.write(buf)?;

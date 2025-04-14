@@ -24,12 +24,16 @@ static SUPPORTED_COMMANDS: [ApiKey; 2] = [
 ];
 
 pub fn process(msg: &[u8], msg_out: &mut Vec<u8>, meta: &Meta) -> anyhow::Result<usize> {
+    let res = process_inner(msg, meta)?;
+    let s = res.write(msg_out)?;
+    Ok(s)
+}
+
+fn process_inner(msg: &[u8], meta: &Meta) -> anyhow::Result<responses::Response> {
     let req = requests::Request::try_from(msg)?;
 
     let res = handle_request(req, meta)?;
-
-    let s = res.write(msg_out)?;
-    Ok(s)
+    Ok(res)
 }
 
 fn handle_request(req: requests::Request, meta: &Meta) -> anyhow::Result<responses::Response> {
@@ -60,12 +64,11 @@ fn handle_request(req: requests::Request, meta: &Meta) -> anyhow::Result<respons
 
 mod fetch {
 
-    use std::path::PathBuf;
-
     use crate::{
         messages::{
-            primitives::CompactArray,
-            requests,
+            disk::CompactRecords,
+            primitives::{CompactArray, Uuid},
+            requests::{self, fetch},
             responses::{self, fetch::Response},
             ErrorCode,
         },
@@ -101,27 +104,13 @@ mod fetch {
         fetch_request: &requests::fetch::Fetch,
         meta: &Meta,
     ) -> anyhow::Result<Vec<Response>> {
-        let topics = meta.topic_map();
-
         let mut res = Vec::with_capacity(fetch_request.topics.vec.len());
 
         for topic in &fetch_request.topics.vec {
-            let error_code = match topics.contains_key(&topic.topic_id) {
-                true => ErrorCode::NoError,
-                false => ErrorCode::UnknownTopic,
-            };
-
             let mut partitions = vec![];
             for p in &topic.partitions.vec {
-                let path = meta.path.clone();
-                eprintln!("{}", path.display());
-
-                let part = Partition {
-                    partition_index: p.partition,
-                    error_code,
-                    ..Default::default()
-                };
-                partitions.push(part);
+                let p = handle_partition(meta, topic.topic_id, p)?;
+                partitions.push(p);
             }
 
             let partitions = CompactArray { vec: partitions };
@@ -134,6 +123,57 @@ mod fetch {
             res.push(response);
         }
         Ok(res)
+    }
+
+    fn handle_partition(
+        meta: &Meta,
+        topic_id: Uuid,
+        partition: &fetch::Partition,
+    ) -> anyhow::Result<responses::fetch::Partition> {
+        let topic_name = match meta.topic_map().get(&topic_id) {
+            Some(topic) => topic,
+            None => {
+                let part = Partition {
+                    partition_index: partition.partition,
+                    error_code: ErrorCode::UnknownTopic,
+                    ..Default::default()
+                };
+                return Ok(part);
+            }
+        };
+        let partition_name = format!("{}-{}", topic_name, partition.partition);
+
+        let path = meta
+            .path()
+            .join(partition_name)
+            .join("00000000000000000000.log");
+
+        eprintln!("{}", path.display());
+
+        if !path.exists() {
+            let part = Partition {
+                partition_index: partition.partition,
+                error_code: ErrorCode::UnknownTopicOrParition,
+                ..Default::default()
+            };
+            return Ok(part);
+        }
+
+        let content = std::fs::read(&path)?;
+
+        let mut records = CompactRecords::default();
+
+        if !content.is_empty() {
+            records = CompactRecords::from_buf(&content)?
+        }
+
+        let part = Partition {
+            partition_index: partition.partition,
+            records,
+            ..Default::default()
+        };
+
+        Ok(part)
     }
 }
 
@@ -162,12 +202,14 @@ fn handle_api_version(
 mod test {
     use pretty_assertions::assert_eq;
 
-    use tempfile::{tempdir, TempDir};
+    use tempfile::TempDir;
 
     use crate::{
-        messages::{disk::RecordBatch, primitives::Deserialize},
-        meta,
-        test_files::{write_files, FILES},
+        messages::{
+            disk::RecordBatch,
+            primitives::{Deserialize, Serialize},
+        },
+        test_files::write_files,
     };
 
     use super::*;
@@ -215,16 +257,14 @@ mod test {
 
     fn fetch_file() -> (Meta, TempDir) {
         let tmp_dir = write_files();
-        (
-            Meta::from_cluster_metadata(meta::PATH).expect("able to read meta cluster"),
-            tmp_dir,
-        )
+        let meta = Meta::from_cluster_metadata(tmp_dir.path()).expect("able to read meta cluster");
+        (meta, tmp_dir)
     }
 
     #[test]
     fn test_fetch_file() {
         let (meta, _) = fetch_file();
-        assert_eq!(meta.rec.vec.vec[0].base_offset, 0x01);
+        assert_eq!(meta.rec.vec[0].base_offset, 0x01);
     }
 
     #[test]
@@ -433,6 +473,83 @@ mod test {
         ];
 
         let mut buf = Vec::with_capacity(150);
-        let _len = process(&arr, &mut buf, &meta).expect("unable to extract");
+        let len = process(&arr, &mut buf, &meta).expect("unable to extract");
+        assert_eq!(buf.len(), len);
+    }
+
+    #[test]
+    fn test_full_parse_fetch_single_topic() {
+        let (meta, _tmp_dir) = fetch_file();
+        let arr = [
+            0x00, 0x00, 0x00, 0x60, // len
+            0x00, 0x01, // request_api_key -> fetch
+            0x00, 0x10, // request_api_version -> 16
+            0x25, 0xfc, 0x97, 0x90, // correlation_id
+            0x00, 0x09, // client_id
+            0x6b, 0x61, 0x66, 0x6b, 0x61, 0x2d, 0x63, 0x6c, 0x69, // kafka-cli
+            0x00, // _tagged_fields
+            0x00, 0x00, 0x01, 0xf4, // max_wait_ms
+            0x00, 0x00, 0x00, 0x01, // min_bytes
+            0x03, 0x20, 0x00, 0x00, // max_bytes
+            0x00, // isolation_level
+            0x00, 0x00, 0x00, 0x00, // session_id
+            0x00, 0x00, 0x00, 0x00, // session_epoch
+            0x02, // topic count => N + 1 -> 1 topic
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, // UUID (part 1)
+            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x52, // UUID (part 2) => baz
+            0x02, // paritions -> N + 1 -> 1 parition
+            0x00, 0x00, 0x00, 0x00, // partition
+            0xff, 0xff, 0xff, 0xff, // current_leader_epoch
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // fetch_offset
+            0xff, 0xff, 0xff, 0xff, // last_fetched_offset
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // log_start_offset
+            0x00, 0x10, 0x00, 0x00, // partition_max_bytes
+            0x00, // _tagged_fields
+            0x00, // _tagged_fields
+            0x01, // forgotten_topics_data count
+            0x01, // rack_id count
+            0x00, // _tagged_fields
+        ];
+
+        let exp_record = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // baseOffset
+            0x00, 0x00, 0x00, 0x47, // batchLength
+            0x00, 0x00, 0x00, 0x00, // partitionLeaderEpoch
+            0x02, // magic
+            0xB8, 0x7C, 0x9C, 0xFF, // CRC
+            0x00, 0x00, // attributes
+            0x00, 0x00, 0x00, 0x00, // lastOffsetDelta
+            0x00, 0x00, 0x01, 0x91, 0xE0, 0x5B, 0x6D, 0x8B, // baseTimestamp
+            0x00, 0x00, 0x01, 0x91, 0xE0, 0x5B, 0x6D, 0x8B, // maxTimestamp
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // producerId
+            0x00, 0x00, // producerEpoch
+            0x00, 0x00, 0x00, 0x00, // baseSequence
+            // -- Record #1
+            0x00, 0x00, 0x00, 0x01, // recordsCount
+            0x2A, // length 0x2A = 21
+            0x00, // attributes
+            0x00, // timestampDelta
+            0x00, // offsetDelta
+            0x01, // keyLenght 0x01 => -1 => null array
+            0x1E, // valueLenght 0x1e => 15
+            0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x55, 0x6E, 0x69, 0x76, 0x65, 0x72, 0x73, 0x65,
+            0x21, // value =>
+            0x00, // headerCount
+        ];
+
+        eprintln!("{:?}", meta.topic_map());
+        let resp = process_inner(&arr, &meta).expect("unable to process response");
+
+        dbg!(&resp);
+
+        match resp.response {
+            responses::ResponseType::Fetch(f) => {
+                let mut v = vec![];
+                let f = &f.responses.vec[0].partitions.vec[0].records.vec[0];
+                f.write(&mut v).expect("correctly written");
+                assert_eq!(exp_record, &v[..]);
+            }
+            _ => unimplemented!("WHY ARE WE HERE"),
+        }
     }
 }
