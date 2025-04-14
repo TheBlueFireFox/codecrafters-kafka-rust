@@ -81,20 +81,14 @@ mod describe_topic_partitions {
     pub fn handle(
         header: requests::Header,
         request: requests::describe_topic_partitions::DescribeTopicPartitions,
-        _meta: &Meta,
+        meta: &Meta,
     ) -> anyhow::Result<responses::describe_topic_partitions::DescribeTopicPartitions> {
-        use responses::describe_topic_partitions::*;
-
         debug_assert_eq!(header.request_api_version, 0);
 
         let mut topics = vec![];
 
         for t in &request.topics.vec {
-            let nt = Topic {
-                error_code: ErrorCode::UnknownTopicOrParition,
-                topic_name: t.name.clone(),
-                ..Default::default()
-            };
+            let nt = handle_topic(t, meta)?;
             topics.push(nt);
         }
 
@@ -105,6 +99,54 @@ mod describe_topic_partitions {
             ..Default::default()
         };
         Ok(des)
+    }
+
+    fn handle_topic(
+        topic: &requests::describe_topic_partitions::Topic,
+        meta: &Meta,
+    ) -> anyhow::Result<responses::describe_topic_partitions::Topic> {
+        use responses::describe_topic_partitions::*;
+
+        let name = topic.name.clone();
+
+        let uuid = match meta.name_map().get(&topic.name.str) {
+            Some(uuid) => uuid,
+            None => {
+                return Ok(Topic {
+                    error_code: ErrorCode::UnknownTopicOrPartition,
+                    topic_name: name,
+                    ..Default::default()
+                })
+            }
+        };
+
+        let part = &meta.uuid_partitions()[uuid];
+        let mut partitions = vec![];
+
+        for pr in part {
+            let p = Partition {
+                error_code: ErrorCode::NoError,
+                partition_index: pr.partition_id,
+                leader_id: pr.leader,
+                leader_epoch: pr.leader_epoch,
+                replica_nodes: pr.replicas.clone(),
+                ..Default::default()
+            };
+
+            partitions.push(p);
+        }
+
+        let partitions = CompactArray { vec: partitions };
+
+        let nt = Topic {
+            error_code: ErrorCode::NoError,
+            topic_name: name,
+            topic_id: *uuid,
+            partitions,
+            ..Default::default()
+        };
+
+        Ok(nt)
     }
 }
 
@@ -176,7 +218,7 @@ mod fetch {
         topic_id: Uuid,
         partition: &fetch::Partition,
     ) -> anyhow::Result<responses::fetch::Partition> {
-        let topic_name = match meta.topic_map().get(&topic_id) {
+        let topic_name = match meta.uuid_map().get(&topic_id) {
             Some(topic) => topic,
             None => {
                 let part = Partition {
@@ -199,7 +241,7 @@ mod fetch {
         if !path.exists() {
             let part = Partition {
                 partition_index: partition.partition,
-                error_code: ErrorCode::UnknownTopicOrParition,
+                error_code: ErrorCode::UnknownTopicOrPartition,
                 ..Default::default()
             };
             return Ok(part);
@@ -593,7 +635,7 @@ mod test {
             0x00, // headerCount
         ];
 
-        eprintln!("{:?}", meta.topic_map());
+        eprintln!("{:?}", meta.uuid_map());
         let resp = process_inner(&arr, &meta).expect("unable to process response");
 
         dbg!(&resp);

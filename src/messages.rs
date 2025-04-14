@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use primitives::Serialize;
+
 #[derive(Debug, Clone, Copy, Default, strum::FromRepr)]
 #[repr(i16)]
 pub enum ApiKeys {
@@ -14,9 +16,16 @@ pub enum ApiKeys {
 pub enum ErrorCode {
     #[default]
     NoError = 0,
-    UnknownTopicOrParition = 3,
+    UnknownTopicOrPartition = 3,
     UnsupportedVersion = 35,
     UnknownTopic = 100,
+}
+
+impl Serialize for ErrorCode {
+    fn write(&self, buf: &mut dyn bytes::BufMut) -> Result<(), primitives::SerializeError> {
+        buf.put_i16(*self as i16);
+        Ok(())
+    }
 }
 
 pub mod primitives {
@@ -311,6 +320,20 @@ pub mod primitives {
             };
 
             Ok(s)
+        }
+    }
+
+    impl Serialize for u8 {
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
+            buf.put_u8(*self);
+            Ok(())
+        }
+    }
+
+    impl Serialize for i32 {
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
+            buf.put_i32(*self);
+            Ok(())
         }
     }
 
@@ -789,6 +812,9 @@ pub mod disk {
 
             match &self.record_type {
                 RecordValueType::TopicRecord(topic_record) => topic_record.write(buf)?,
+                RecordValueType::PartitionRecord(partition_record) => {
+                    partition_record.write(buf)?
+                }
                 RecordValueType::Other(items) => buf.put_slice(&items[..]),
             }
 
@@ -804,6 +830,7 @@ pub mod disk {
 
             let r = match r_type {
                 0x2 => TopicRecord::parse(buf).map(RecordValueType::TopicRecord)?,
+                0x3 => PartitionRecord::parse(buf).map(RecordValueType::PartitionRecord)?,
                 _ => RecordValueType::Other(buf.chunk().to_vec()),
             };
 
@@ -819,6 +846,7 @@ pub mod disk {
     #[derive(Debug, Clone)]
     pub enum RecordValueType {
         TopicRecord(TopicRecord),
+        PartitionRecord(PartitionRecord),
         Other(Vec<u8>),
     }
 
@@ -853,6 +881,70 @@ pub mod disk {
             };
 
             Ok(m)
+        }
+    }
+
+    /// https://binspec.org/kafka-cluster-metadata?highlight=191-255
+    #[derive(Debug, Clone)]
+    pub struct PartitionRecord {
+        pub partition_id: i32,
+        pub topic_uuid: Uuid,
+        pub replicas: CompactArray<i32>,
+        pub sync_replicas: CompactArray<i32>,
+        pub removing_replicas: CompactArray<i32>,
+        pub adding_replicas: CompactArray<i32>,
+        pub leader: i32,
+        pub leader_epoch: i32,
+        pub partition_epoch: i32,
+        pub directories: CompactArray<Uuid>,
+        pub _tagged_fields: TaggedFields,
+    }
+
+    impl Serialize for PartitionRecord {
+        fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
+            self.partition_id.write(buf)?;
+            self.topic_uuid.write(buf)?;
+            self.replicas.write(buf)?;
+            self.sync_replicas.write(buf)?;
+            self.removing_replicas.write(buf)?;
+            self.adding_replicas.write(buf)?;
+            self.leader.write(buf)?;
+            self.leader_epoch.write(buf)?;
+            self.partition_epoch.write(buf)?;
+            self.directories.write(buf)?;
+            self._tagged_fields.write(buf)?;
+
+            Ok(())
+        }
+    }
+
+    impl Deserialize for PartitionRecord {
+        fn parse(buf: &mut dyn Buf) -> Result<Self, DeserializeError> {
+            let partition_id = i32::parse(buf)?;
+            let topic_uuid = Uuid::parse(buf)?;
+            let replicas = CompactArray::parse(buf)?;
+            let sync_replicas = CompactArray::parse(buf)?;
+            let removing_replicas = CompactArray::parse(buf)?;
+            let adding_replicas = CompactArray::parse(buf)?;
+            let leader = i32::parse(buf)?;
+            let leader_epoch = i32::parse(buf)?;
+            let partition_epoch = i32::parse(buf)?;
+            let directories = CompactArray::parse(buf)?;
+            let _tagged_fields = TaggedFields::parse(buf)?;
+
+            Ok(Self {
+                partition_id,
+                topic_uuid,
+                replicas,
+                sync_replicas,
+                removing_replicas,
+                adding_replicas,
+                leader,
+                leader_epoch,
+                partition_epoch,
+                directories,
+                _tagged_fields,
+            })
         }
     }
 
@@ -1208,7 +1300,7 @@ pub mod requests {
         ///     partition_index => INT32
         #[derive(Debug, Clone)]
         pub struct DescribeTopicPartitions {
-            pub topics: CompactArray<Topics>,
+            pub topics: CompactArray<Topic>,
             pub response_partition_limit: i32,
             pub cursor: Option<Cursor>,
             pub _tagged_fields: TaggedFields,
@@ -1237,12 +1329,12 @@ pub mod requests {
         ///   topics => name _tagged_fields
         ///     name => COMPACT_STRING
         #[derive(Debug, Clone)]
-        pub struct Topics {
+        pub struct Topic {
             pub name: CompactString,
             pub _tagged_fields: TaggedFields,
         }
 
-        impl Deserialize for Topics {
+        impl Deserialize for Topic {
             fn parse(buf: &mut dyn bytes::Buf) -> Result<Self, DeserializeError> {
                 let name = CompactString::parse(buf)?;
                 let _tagged_fields = TaggedFields::parse(buf)?;
@@ -1444,12 +1536,35 @@ pub mod responses {
             }
         }
 
+        /// https://binspec.org/kafka-describe-topic-partitions-response-v0?highlight=38-65
         #[derive(Debug, Clone, Default)]
-        pub struct Partition {}
+        pub struct Partition {
+            pub error_code: ErrorCode,
+            pub partition_index: i32,
+            pub leader_id: i32,
+            pub leader_epoch: i32,
+            pub replica_nodes: CompactArray<i32>,
+            pub isr_nodes: CompactArray<i32>,
+            pub eligible_leader_replicas: CompactArray<i32>,
+            pub last_known_elr: CompactArray<i32>,
+            pub offline_replicas: CompactArray<i32>,
+            pub _tagged_fields: TaggedFields,
+        }
 
         impl Serialize for Partition {
-            fn write(&self, _buf: &mut dyn BufMut) -> Result<(), SerializeError> {
-                todo!()
+            fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
+                self.error_code.write(buf)?;
+                self.partition_index.write(buf)?;
+                self.leader_id.write(buf)?;
+                self.leader_epoch.write(buf)?;
+                self.replica_nodes.write(buf)?;
+                self.isr_nodes.write(buf)?;
+                self.eligible_leader_replicas.write(buf)?;
+                self.last_known_elr.write(buf)?;
+                self.offline_replicas.write(buf)?;
+                self._tagged_fields.write(buf)?;
+
+                Ok(())
             }
         }
     }
@@ -1474,7 +1589,7 @@ pub mod responses {
 
         impl Serialize for ApiVersions {
             fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
-                buf.put_i16(self.error_code as i16);
+                self.error_code.write(buf)?;
 
                 self.api_keys.write(buf)?;
 
@@ -1546,7 +1661,7 @@ pub mod responses {
         impl Serialize for Fetch {
             fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
                 buf.put_i32(self.throttle_time_ms);
-                buf.put_i16(self.error_code as i16);
+                self.error_code.write(buf)?;
                 buf.put_i32(self.session_id);
 
                 self.responses.write(buf)?;
@@ -1612,7 +1727,9 @@ pub mod responses {
         impl Serialize for Partition {
             fn write(&self, buf: &mut dyn BufMut) -> Result<(), SerializeError> {
                 buf.put_i32(self.partition_index);
-                buf.put_i16(self.error_code as i16);
+
+                self.error_code.write(buf)?;
+
                 buf.put_i64(self.high_watermark);
                 buf.put_i64(self.last_stable_offset);
                 buf.put_i64(self.log_start_offset);
